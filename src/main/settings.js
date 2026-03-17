@@ -8,11 +8,12 @@ const DEFAULT_SETTINGS = {
   overlay: {
     x: -1,
     y: 0,
-    width: 320,
+    width: 340,
     height: 900,
     opacity: 0.85,
     locked: false,
     visible: true,
+    minimized: false,
   },
   columns: {
     grade: true,
@@ -33,6 +34,7 @@ const DEFAULT_SETTINGS = {
     autoLaunch: false,
     hotkey_toggle: 'Alt+H',
     hotkey_interact: 'Alt+D',
+    draftFormat: 'PremierDraft',
   },
 };
 
@@ -58,7 +60,7 @@ function load() {
   } catch (err) {
     console.error('[settings] Failed to load settings, using defaults:', err.message);
   }
-  return { ...DEFAULT_SETTINGS };
+  return deepMerge({}, DEFAULT_SETTINGS);
 }
 
 function save(settings) {
@@ -71,7 +73,6 @@ function save(settings) {
   }
 }
 
-// In-memory cache
 let _settings = null;
 
 function get() {
@@ -81,15 +82,19 @@ function get() {
 
 function set(keyPath, value) {
   if (!_settings) _settings = load();
-
   const keys = keyPath.split('.');
   let obj = _settings;
   for (let i = 0; i < keys.length - 1; i++) {
-    if (!obj[keys[i]]) obj[keys[i]] = {};
+    if (!obj[keys[i]] || typeof obj[keys[i]] !== 'object') obj[keys[i]] = {};
     obj = obj[keys[i]];
   }
   obj[keys[keys.length - 1]] = value;
+  save(_settings);
+  return _settings;
+}
 
+function reset() {
+  _settings = deepMerge({}, DEFAULT_SETTINGS);
   save(_settings);
   return _settings;
 }
@@ -101,4 +106,4 @@ function resolveArenaLogPath(rawPath) {
     .replace(/\//g, path.sep);
 }
 
-module.exports = { get, set, resolveArenaLogPath, DEFAULT_SETTINGS };
+module.exports = { get, set, reset, resolveArenaLogPath, DEFAULT_SETTINGS };

@@ -1,80 +1,95 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import DraftOverlay from './components/DraftOverlay';
 import SettingsPanel from './components/SettingsPanel';
 import OverlayHeader from './components/OverlayHeader';
 import { useDraftState } from './hooks/useDraftState';
 import { useSettings } from './hooks/useSettings';
 
-const STATUS_LABELS = {
-  watching: 'Watching for Arena...',
-  'arena-detected': 'Arena detected',
-  'log-not-found': 'Log file not found',
-  error: 'Watcher error',
-  'draft-active': 'Draft in progress',
-};
-
 export default function App() {
   const { settings, setSetting, loading: settingsLoading } = useSettings();
-  const { draftState } = useDraftState();
+  const { draftState, reEnrichWithColorPair } = useDraftState(settings);
 
   const [status, setStatus] = useState('watching');
   const [isInteractable, setIsInteractable] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [sortBy, setSortBy] = useState('grade');
 
   useEffect(() => {
+    if (!window.electronAPI) return;
     const unsubs = [
       window.electronAPI.onStatusUpdate(setStatus),
       window.electronAPI.onInteractableChanged(setIsInteractable),
       window.electronAPI.onOpenSettings(() => setShowSettings(true)),
     ];
-    return () => unsubs.forEach(fn => fn());
+    return () => unsubs.forEach((fn) => fn());
   }, []);
+
+  // Sync sort preference from settings on load
+  useEffect(() => {
+    if (settings?.display?.sortBy) setSortBy(settings.display.sortBy);
+  }, [settings?.display?.sortBy]);
+
+  const handleSortChange = useCallback((val) => {
+    setSortBy(val);
+    setSetting('display.sortBy', val);
+  }, [setSetting]);
+
+  const handleColorFilterChange = useCallback((val) => {
+    setSetting('display.colorFilter', val);
+    reEnrichWithColorPair(val);
+  }, [setSetting, reEnrichWithColorPair]);
 
   if (settingsLoading) return null;
 
-  const statusLabel = draftState.inDraft
-    ? `Pack ${draftState.packNumber + 1} · Pick ${draftState.pickNumber + 1}`
-    : (STATUS_LABELS[status] || status);
+  const opacity = settings?.overlay?.opacity ?? 0.85;
 
   return (
-    <div
-      style={{
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        background: isInteractable
-          ? 'rgba(10, 10, 20, 0.92)'
-          : 'rgba(10, 10, 20, 0.85)',
-        border: isInteractable ? '1px solid rgba(120, 160, 255, 0.6)' : '1px solid transparent',
-        borderRadius: 8,
-        color: '#e8e8e8',
-        overflow: 'hidden',
-        userSelect: isInteractable ? 'auto' : 'none',
-        pointerEvents: isInteractable ? 'auto' : 'none',
-      }}
-    >
+    <div style={{
+      width: '100%',
+      height: isMinimized ? 'auto' : '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: `rgba(10,10,22,${opacity})`,
+      border: isInteractable ? '1px solid rgba(100,140,255,0.5)' : '1px solid transparent',
+      borderRadius: 8,
+      color: '#e0e0e0',
+      overflow: 'hidden',
+      userSelect: isInteractable ? 'auto' : 'none',
+      pointerEvents: isInteractable ? 'auto' : 'none',
+    }}>
       <OverlayHeader
-        status={statusLabel}
-        isInteractable={isInteractable}
-        onToggleInteract={() => window.electronAPI.toggleInteract()}
-        onOpenSettings={() => setShowSettings(true)}
+        setCode={draftState.setCode}
+        format={draftState.format ?? settings?.general?.draftFormat}
+        inDraft={draftState.inDraft}
         packNumber={draftState.packNumber}
         pickNumber={draftState.pickNumber}
-        inDraft={draftState.inDraft}
+        totalPicks={draftState.totalPicks}
+        sortBy={sortBy}
+        onSortChange={handleSortChange}
+        status={status}
+        isInteractable={isInteractable}
+        isMinimized={isMinimized}
+        onToggleMinimize={() => setIsMinimized((m) => !m)}
+        onToggleInteract={() => window.electronAPI?.toggleInteract()}
+        onOpenSettings={() => setShowSettings(true)}
+        landsStatus={draftState.landsStatus}
       />
 
-      {showSettings ? (
-        <SettingsPanel
-          settings={settings}
-          onSet={setSetting}
-          onClose={() => setShowSettings(false)}
-        />
-      ) : (
-        <DraftOverlay
-          draftState={draftState}
-          settings={settings}
-        />
+      {!isMinimized && (
+        showSettings ? (
+          <SettingsPanel
+            settings={settings}
+            onSet={setSetting}
+            onClose={() => setShowSettings(false)}
+          />
+        ) : (
+          <DraftOverlay
+            draftState={draftState}
+            settings={{ ...settings, display: { ...settings?.display, sortBy } }}
+            onColorFilterChange={handleColorFilterChange}
+          />
+        )
       )}
     </div>
   );
