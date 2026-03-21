@@ -173,10 +173,16 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
 }
 
 /**
- * Get the IDs of cards in a pack that still need name resolution.
+ * Get the IDs of cards in a pack that still need Scryfall name resolution.
+ * Skips cards already resolvable via 17Lands idLookup or scryfallCache.
  */
-export function getMissingIds(cards) {
+export function getMissingIds(cards, setCode, format = 'PremierDraft') {
   return cards
-    .filter((c) => c.grpId && !c.name && !scryfallCache.has(c.grpId))
+    .filter((c) => {
+      if (!c.grpId || c.name) return false;
+      if (scryfallCache.has(c.grpId)) return false;
+      if (setCode && lookupByGrpId(c.grpId, setCode, format)) return false;
+      return true;
+    })
     .map((c) => c.grpId);
 }

@@ -135,8 +135,8 @@ export function useDraftState(settings) {
         pendingPack.current = cards;
         if (sc) currentSetCode.current = sc;
 
-        // Resolve any missing card names via Scryfall
-        const missingIds = getMissingIds(cards);
+        // Resolve any missing card names via Scryfall (skip cards 17Lands already knows)
+        const missingIds = getMissingIds(cards, sc, fmt);
         if (missingIds.length > 0 && window.electronAPI) {
           window.electronAPI.resolveArenaIds(missingIds).then((idMap) => {
             if (idMap && Object.keys(idMap).length > 0) {

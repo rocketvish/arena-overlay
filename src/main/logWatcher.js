@@ -77,6 +77,8 @@ function emitLogUpdated() {
 const DRAFT_MARKERS = [
   'BotDraftDraftStatus',
   'HumanDraftDraftStatus',
+  'BotDraftDraftPick',
+  'HumanDraftDraftPick',
   'Draft/DraftStatus',
   'Event/DraftNotify',
   'BotDraftMakePick',
