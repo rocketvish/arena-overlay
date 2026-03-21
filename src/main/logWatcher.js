@@ -24,6 +24,8 @@ let stats = {
 
 let lastActivityTime = Date.now();
 let lastStaleWarned = false;
+let lastForceReread = 0;       // timestamp of last forced re-read
+let forcedReadInProgress = false; // suppress lastActivityTime update during forced reads
 
 // ── Burst buffering ───────────────────────────────────────────────────────────
 
@@ -154,8 +156,10 @@ function readNewContent(filePath) {
 
     if (currentSize === lastSize) return;
 
-    lastActivityTime = Date.now();
-    lastStaleWarned = false;
+    if (!forcedReadInProgress) {
+      lastActivityTime = Date.now();
+      lastStaleWarned = false;
+    }
 
     const fd = fs.openSync(filePath, 'r');
     const bufLen = currentSize - lastSize;
@@ -190,14 +194,17 @@ function setupStaleDetection() {
     const inDraft = parserState?.inDraft ?? false;
 
     if (inDraft && elapsed > 30000) {
-      // In draft but no activity for 30s — force re-read last portion
-      if (fs.existsSync(logPath)) {
+      // In draft but no activity for 30s — force re-read last portion once per 30s
+      const sinceForcedReread = Date.now() - lastForceReread;
+      if (sinceForcedReread > 30000 && fs.existsSync(logPath)) {
         const stat = fs.statSync(logPath);
         const rereadSize = Math.max(0, stat.size - 10000);
         if (rereadSize < lastSize) {
-          console.log('[logWatcher] Stale detection: forcing re-read');
+          lastForceReread = Date.now();
+          forcedReadInProgress = true;
           lastSize = rereadSize;
           readNewContent(logPath);
+          forcedReadInProgress = false;
         }
       }
     }

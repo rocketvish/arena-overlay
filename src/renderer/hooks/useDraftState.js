@@ -30,6 +30,8 @@ export function useDraftState(settings) {
   const pendingPack = useRef(null);
   const currentSetCode = useRef(null);
   const currentFormat = useRef('PremierDraft');
+  // Track landsStatus synchronously so onPackOpened can see it without stale closure
+  const landsStatusRef = useRef(null);
 
   // ── Enrichment helper ──────────────────────────────────────────────────────
   const enrich = useCallback(
@@ -44,12 +46,14 @@ export function useDraftState(settings) {
   const fetchLandsData = useCallback(async (setCode, format) => {
     if (!window.electronAPI || !setCode) return;
 
+    landsStatusRef.current = 'fetching';
     setDraftState((prev) => ({ ...prev, landsStatus: 'fetching', landsError: null }));
 
     try {
       const result = await window.electronAPI.fetchSetData(setCode, format);
       if (result?.data) {
         loadSetData(setCode, format, result.data);
+        landsStatusRef.current = 'loaded';
         setDraftState((prev) => ({
           ...prev,
           landsStatus: 'loaded',
@@ -58,8 +62,10 @@ export function useDraftState(settings) {
             : prev.enrichedPack,
         }));
       } else if (result?.noData) {
+        landsStatusRef.current = 'no-data';
         setDraftState((prev) => ({ ...prev, landsStatus: 'no-data', landsError: null }));
       } else {
+        landsStatusRef.current = 'error';
         setDraftState((prev) => ({
           ...prev,
           landsStatus: 'error',
@@ -67,6 +73,7 @@ export function useDraftState(settings) {
         }));
       }
     } catch (err) {
+      landsStatusRef.current = 'error';
       setDraftState((prev) => ({
         ...prev,
         landsStatus: 'error',
@@ -114,6 +121,7 @@ export function useDraftState(settings) {
         currentSetCode.current = setCode;
         currentFormat.current = format;
         pendingPack.current = null;
+        landsStatusRef.current = null;
         clearSetData(setCode);
 
         setDraftState({
@@ -135,8 +143,13 @@ export function useDraftState(settings) {
         pendingPack.current = cards;
         if (sc) currentSetCode.current = sc;
 
-        // Resolve any missing card names via Scryfall (skip cards 17Lands already knows)
-        const missingIds = getMissingIds(cards, sc, fmt);
+        // Only call Scryfall when 17Lands won't resolve the names itself.
+        // If 17Lands is fetching, skip — re-enrichment runs when it loads.
+        // If 17Lands has no data or errored, try Scryfall as a fallback.
+        const ls = landsStatusRef.current;
+        const missingIds = (ls === 'no-data' || ls === 'error' || ls === null)
+          ? getMissingIds(cards, sc, fmt)
+          : [];
         if (missingIds.length > 0 && window.electronAPI) {
           window.electronAPI.resolveArenaIds(missingIds).then((idMap) => {
             if (idMap && Object.keys(idMap).length > 0) {
