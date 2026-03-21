@@ -341,15 +341,24 @@ function attachGrades(rawCards) {
 
 // ─── Normalization ───────────────────────────────────────────────────────────
 
-const RARITY_MAP = { C: 'common', U: 'uncommon', R: 'rare', M: 'mythic' };
+// 17Lands API has historically used single-letter codes (C/U/R/M) but newer
+// endpoints return full English words — handle both to be safe.
+const RARITY_MAP = {
+  C: 'common',   U: 'uncommon',  R: 'rare',  M: 'mythic',
+  COMMON: 'common', UNCOMMON: 'uncommon', RARE: 'rare', MYTHIC: 'mythic',
+};
 
-function normalizeCard(c) {
+function normalizeCard(c, index) {
   return {
     name: c.name,
     mtgaId: c.mtga_id ?? null, // Arena grpId — present in 17Lands raw data
     color: c.color ?? '',
     rarity: RARITY_MAP[(c.rarity ?? '').toUpperCase()] ?? 'common',
     cmc: c.cmc ?? null,
+    // Position in the 17Lands data array ≈ collector number − 1.
+    // Used by the overlay to reproduce Arena's visual pack sort order
+    // (rarity descending, then collector number ascending within rarity).
+    collectorNumber: typeof index === 'number' ? index : null,
     stats: {
       grade: c._grade,
       gihwr: c.ever_drawn_win_rate ?? null,

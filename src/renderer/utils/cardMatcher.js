@@ -50,7 +50,9 @@ export function loadSetData(setCode, format, cards) {
   const key = `${setCode}:${format}`;
   const nameMap = new Map();
   const idMap = new Map();
-  for (const card of cards) {
+  for (let i = 0; i < cards.length; i++) {
+    // Back-fill collectorNumber from array index for caches written before the field was added
+    const card = cards[i].collectorNumber != null ? cards[i] : { ...cards[i], collectorNumber: i };
     if (card.name) nameMap.set(normalizeName(card.name), card);
     if (card.mtgaId != null) idMap.set(card.mtgaId, card);
   }
@@ -167,6 +169,9 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
       color: lands?.color ?? card.color ?? scryfallData?.colorIdentity ?? '',
       rarity: lands?.rarity ?? card.rarity ?? scryfallData?.rarity ?? 'common',
       cmc: lands?.cmc ?? card.cmc ?? scryfallData?.cmc ?? null,
+      // Collector number proxy from 17Lands array index — drives Arena visual sort order.
+      // Always taken from base-set byId lookup so color-pair overlays don't corrupt the order.
+      collectorNumber: byId?.collectorNumber ?? byName?.collectorNumber ?? null,
       stats: lands?.stats ?? null,
     };
   });

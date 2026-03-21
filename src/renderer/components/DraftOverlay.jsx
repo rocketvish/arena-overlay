@@ -2,42 +2,53 @@ import React, { useMemo } from 'react';
 import CardRow from './CardRow';
 
 // ── Arena visual sort ─────────────────────────────────────────────────────────
-// Matches Arena's on-screen pack layout: Rare/Mythic → Uncommon → Common,
-// within rarity by color (W U B R G Multi Colorless), then CMC asc, then name.
+// Arena displays pack cards sorted by: rarity (mythic→rare→uncommon→common),
+// then by collector number ascending within each rarity tier.
+//
+// The collectorNumber field on each enriched card is the card's 0-based index
+// in the 17Lands data array, which empirically matches collector number − 1.
+// Cards not in 17Lands (basic lands, very new cards) have no collectorNumber
+// and sort to the end of the list.
+//
+// Verified against a TMT pack where Shredder's Armor (uncommon, coll#75)
+// appeared before all commons; and within commons, cards followed collector
+// number order (W#9 → U#53 → R#111 → G#118 → G#129 → WB#147 → ...).
 const RARITY_ORDER = { mythic: 0, rare: 1, uncommon: 2, common: 3 };
-const COLOR_ORDER  = { W: 0, U: 1, B: 2, R: 3, G: 4 };
-
-function colorKey(color) {
-  const c = (color ?? '').replace(/[^WUBRG]/g, '');
-  if (c.length === 0) return 6; // colorless/artifact
-  if (c.length > 1)  return 5; // multicolor
-  return COLOR_ORDER[c] ?? 6;
-}
 
 function arenaVisualSort(cards) {
   return cards.map((c, i) => ({ card: c, i })).sort((a, b) => {
     const ca = a.card, cb = b.card;
-    // Cards without 17Lands stats have no reliable rarity/color/cmc — keep log order
-    const hasA = ca.stats !== null;
-    const hasB = cb.stats !== null;
+
+    // Cards with no 17Lands data have no collectorNumber — sort them last, preserving log order
+    const hasA = ca.collectorNumber != null;
+    const hasB = cb.collectorNumber != null;
     if (!hasA && !hasB) return a.i - b.i;
     if (!hasA) return 1;
     if (!hasB) return -1;
 
-    const rA = RARITY_ORDER[ca.rarity] ?? 4;
-    const rB = RARITY_ORDER[cb.rarity] ?? 4;
+    // Primary: rarity (mythic/rare before uncommon before common)
+    const rA = RARITY_ORDER[ca.rarity] ?? 3;
+    const rB = RARITY_ORDER[cb.rarity] ?? 3;
     if (rA !== rB) return rA - rB;
 
-    const cA = colorKey(ca.color);
-    const cB = colorKey(cb.color);
-    if (cA !== cB) return cA - cB;
-
-    const mA = ca.cmc ?? 999;
-    const mB = cb.cmc ?? 999;
-    if (mA !== mB) return mA - mB;
-
-    return (ca.name ?? '').localeCompare(cb.name ?? '');
+    // Secondary: collector number ascending
+    return ca.collectorNumber - cb.collectorNumber;
   }).map(({ card }) => card);
+}
+
+// ── Basic land name resolution ────────────────────────────────────────────────
+// Basic lands are not in the 17Lands card pool (they're not drafted normally)
+// so they arrive with no name. Hardcode the standard basic land names so the
+// overlay shows "Forest" instead of "#100652".
+const BASIC_LAND_NAMES = {
+  // TMT (TMNT) set basic land Arena IDs — inferred from gap in 17Lands data
+  100648: 'Plains', 100649: 'Island', 100650: 'Swamp',
+  100651: 'Mountain', 100652: 'Forest',
+};
+
+function resolveBasicLandName(card) {
+  if (card.name) return card.name;
+  return BASIC_LAND_NAMES[card.grpId] ?? null;
 }
 
 // ── Column header row ─────────────────────────────────────────────────────────
@@ -127,12 +138,16 @@ export default function DraftOverlay({ draftState, settings, recommendation }) {
 
   const { inDraft, enrichedPack, pickedCards, landsStatus, landsError } = draftState;
 
-  // Sort to match Arena's visual pack layout (rarity → color → cmc → name)
+  // Resolve basic land names, then sort to match Arena's visual pack layout
   const cards = useMemo(() => {
-    const sorted = arenaVisualSort(enrichedPack ?? []);
+    const resolved = (enrichedPack ?? []).map((c) => {
+      const name = resolveBasicLandName(c);
+      return name !== c.name ? { ...c, name } : c;
+    });
+    const sorted = arenaVisualSort(resolved);
     if (sorted.length > 0) {
       console.log('[overlay] Pack order:', sorted.map((c, i) =>
-        `${i + 1}. ${c.name ?? `#${c.grpId}`} (${c.rarity?.[0]?.toUpperCase() ?? '?'} ${c.color || 'C'} ${c.cmc ?? '?'})`
+        `${i + 1}. ${c.name ?? `#${c.grpId}`} (${c.rarity?.[0]?.toUpperCase() ?? '?'} coll#${c.collectorNumber ?? '?'})`
       ).join('\n'));
     }
     return sorted;
