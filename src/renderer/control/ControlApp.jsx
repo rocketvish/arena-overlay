@@ -26,7 +26,6 @@ export default function ControlApp() {
       window.electronAPI.onUpdateAvailable?.(() => setUpdateAvailable(true)),
     ].filter(Boolean);
 
-    // Query initial watcher status
     window.electronAPI.getWatcherStatus?.().then((s) => {
       if (s) setWatcherRunning(s.running);
     });
@@ -56,30 +55,17 @@ export default function ControlApp() {
   }
 
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column',
-      height: '100%', background: '#0d0d1a', color: '#e0e0e0',
-    }}>
-      {/* Status bar */}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d0d1a', color: '#e0e0e0' }}>
       <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} />
 
-      {/* Update banner */}
       {updateAvailable && (
-        <div style={{
-          padding: '6px 16px', background: 'rgba(80,160,80,0.2)',
-          borderBottom: '1px solid rgba(80,160,80,0.3)',
-          fontSize: 12, color: '#7ec8a0', display: 'flex', alignItems: 'center', gap: 8,
-        }}>
-          <span>Update available! Restart the app to install.</span>
+        <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.2)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0' }}>
+          Update available! Restart the app to install.
         </div>
       )}
 
       {/* Navigation tabs */}
-      <div style={{
-        display: 'flex', gap: 0,
-        borderBottom: '1px solid rgba(255,255,255,0.08)',
-        flexShrink: 0,
-      }}>
+      <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
         {NAV_TABS.map((tab) => (
           <button
             key={tab.id}
@@ -99,12 +85,10 @@ export default function ControlApp() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Watcher control button */}
         <button
           onClick={handleToggleWatcher}
           style={{
-            margin: '4px 8px',
-            padding: '4px 12px', fontSize: 11,
+            margin: '4px 8px', padding: '4px 12px', fontSize: 11,
             background: watcherRunning ? 'rgba(200,80,80,0.2)' : 'rgba(80,200,120,0.2)',
             border: `1px solid ${watcherRunning ? 'rgba(200,80,80,0.4)' : 'rgba(80,200,120,0.4)'}`,
             borderRadius: 4,
@@ -120,7 +104,12 @@ export default function ControlApp() {
       {/* Tab content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {activeTab === 'draft' && (
-          <DraftPanel draftState={draftState} />
+          <DraftPanel
+            draftState={draftState}
+            settings={settings}
+            onSet={setSetting}
+            reEnrichWithColorPair={reEnrichWithColorPair}
+          />
         )}
         {activeTab === 'settings' && (
           <div style={{ flex: 1, overflowY: 'auto', background: '#0d0d1a' }}>
@@ -134,16 +123,10 @@ export default function ControlApp() {
       </div>
 
       {/* Footer */}
-      <div style={{
-        padding: '6px 16px', flexShrink: 0,
-        borderTop: '1px solid rgba(255,255,255,0.05)',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
+      <div style={{ padding: '6px 16px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span style={{ fontSize: 10, color: '#333' }}>Arena Overlay v{version}</span>
         <span style={{ fontSize: 10, color: '#333' }}>
-          {draftState.inDraft
-            ? `${draftState.setCode ?? '?'} · Pack ${draftState.packNumber + 1}`
-            : 'Idle'}
+          {draftState.inDraft ? `${draftState.setCode ?? '?'} · Pack ${draftState.packNumber + 1}` : 'Idle'}
         </span>
       </div>
     </div>

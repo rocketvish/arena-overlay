@@ -1,5 +1,44 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import CardRow from '../../components/CardRow';
+import ColorFilter from '../../components/ColorFilter';
 
+// ── Sorting ───────────────────────────────────────────────────────────────────
+const GRADE_ORDER = ['A+','A','A-','B+','B','B-','C+','C','C-','D+','D','D-','F'];
+const COLOR_ORDER = { W: 0, U: 1, B: 2, R: 3, G: 4 };
+
+function colorSortKey(color) {
+  if (!color) return 9;
+  if (color.length > 1) return 8;
+  return COLOR_ORDER[color[0]] ?? 9;
+}
+
+function sortCards(cards, sortBy) {
+  return [...cards].sort((a, b) => {
+    switch (sortBy) {
+      case 'grade': {
+        const ai = GRADE_ORDER.indexOf(a.stats?.grade ?? '');
+        const bi = GRADE_ORDER.indexOf(b.stats?.grade ?? '');
+        return (ai === -1 ? GRADE_ORDER.length : ai) - (bi === -1 ? GRADE_ORDER.length : bi);
+      }
+      case 'gihwr': return (b.stats?.gihwr ?? -1) - (a.stats?.gihwr ?? -1);
+      case 'ohwr':  return (b.stats?.ohwr  ?? -1) - (a.stats?.ohwr  ?? -1);
+      case 'color': return colorSortKey(a.color) - colorSortKey(b.color);
+      case 'name':  return (a.name ?? '').localeCompare(b.name ?? '');
+      default: return 0;
+    }
+  });
+}
+
+const COLOR_CHARS = new Set(['W','U','B','R','G']);
+
+function cardMatchesFilter(card, colorFilter) {
+  if (!colorFilter || colorFilter === 'all') return true;
+  const cardColor = (card.color ?? '').replace(/[^WUBRG]/g, '');
+  if (cardColor.length === 0) return true; // colorless — always shown
+  return [...colorFilter].some((c) => COLOR_CHARS.has(c) && cardColor.includes(c));
+}
+
+// ── Grade colors ──────────────────────────────────────────────────────────────
 const GRADE_COLORS = {
   'A+': '#32c850', 'A': '#32c850', 'A-': '#50d264',
   'B+': '#28aadc', 'B': '#28aadc', 'B-': '#3cb4c8',
@@ -8,31 +47,24 @@ const GRADE_COLORS = {
   'F': '#c83232',
 };
 
-function pct(v) {
-  return v != null ? `${(v * 100).toFixed(1)}%` : '—';
-}
+function pct(v) { return v != null ? `${(v * 100).toFixed(1)}%` : '—'; }
 
 function RecommendedCard({ card, label, primary }) {
   if (!card) return null;
   const grade = card.stats?.grade;
   const gradeColor = grade ? (GRADE_COLORS[grade] ?? '#888') : '#888';
-
   return (
     <div style={{
       background: primary ? 'rgba(80,200,120,0.10)' : 'rgba(255,255,255,0.04)',
       border: `1px solid ${primary ? 'rgba(80,200,120,0.3)' : 'rgba(255,255,255,0.08)'}`,
-      borderRadius: 6,
-      padding: '10px 14px',
+      borderRadius: 6, padding: '10px 14px',
     }}>
       <div style={{ fontSize: 10, color: '#555', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
         {label}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {grade && (
-          <span style={{
-            fontSize: 20, fontWeight: 700, color: gradeColor,
-            minWidth: 36, textAlign: 'center',
-          }}>
+          <span style={{ fontSize: 20, fontWeight: 700, color: gradeColor, minWidth: 36, textAlign: 'center' }}>
             {grade}
           </span>
         )}
@@ -50,15 +82,41 @@ function RecommendedCard({ card, label, primary }) {
   );
 }
 
-export default function DraftPanel({ draftState }) {
+const SORT_OPTIONS = [
+  { value: 'grade',  label: 'Grade' },
+  { value: 'gihwr', label: 'GIH%' },
+  { value: 'ohwr',  label: 'OH%' },
+  { value: 'color', label: 'Color' },
+  { value: 'name',  label: 'Name' },
+];
+
+export default function DraftPanel({ draftState, settings, onSet, reEnrichWithColorPair }) {
   const { inDraft, enrichedPack, pickedCards, recommendation } = draftState;
+  const columns  = settings?.columns  ?? {};
+  const display  = settings?.display  ?? {};
+  const sortBy      = display.sortBy      ?? 'grade';
+  const colorFilter = display.colorFilter ?? 'all';
+  const compact     = display.compactMode ?? false;
+
+  const sortedFiltered = useMemo(() => {
+    const filtered = (enrichedPack ?? []).filter((c) => cardMatchesFilter(c, colorFilter));
+    return sortCards(filtered, sortBy);
+  }, [enrichedPack, sortBy, colorFilter]);
+
+  const recommendedGrpId = recommendation?.primary?.grpId ?? null;
+
+  function handleColorChange(val) {
+    onSet('display.colorFilter', val);
+    reEnrichWithColorPair?.(val);
+  }
+
+  function handleSortChange(val) {
+    onSet('display.sortBy', val);
+  }
 
   if (!inDraft) {
     return (
-      <div style={{
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexDirection: 'column', gap: 12, padding: 32, textAlign: 'center',
-      }}>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12, padding: 32, textAlign: 'center' }}>
         <div style={{ fontSize: 40, opacity: 0.15 }}>🃏</div>
         <div style={{ fontSize: 13, color: '#444' }}>
           No draft active
@@ -69,79 +127,74 @@ export default function DraftPanel({ draftState }) {
     );
   }
 
-  const packSize = enrichedPack?.length ?? 0;
-
   return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Recommendation */}
       {recommendation && (
-        <div>
-          <div style={{ fontSize: 11, color: '#555', marginBottom: 8 }}>Recommendation</div>
+        <div style={{ padding: '12px 16px 8px', flexShrink: 0 }}>
           <RecommendedCard card={recommendation.primary} label="Best Pick" primary />
           {recommendation.secondary && recommendation.secondary.grpId !== recommendation.primary?.grpId && (
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 6 }}>
               <RecommendedCard card={recommendation.secondary} label="Runner-Up" primary={false} />
             </div>
           )}
           {recommendation.explanation && (
-            <div style={{
-              marginTop: 8, padding: '6px 10px',
-              background: 'rgba(255,255,255,0.03)',
-              borderRadius: 4, fontSize: 11, color: '#777', fontStyle: 'italic',
-            }}>
+            <div style={{ marginTop: 6, padding: '5px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: 4, fontSize: 11, color: '#777', fontStyle: 'italic' }}>
               {recommendation.explanation}
             </div>
           )}
         </div>
       )}
 
-      {/* Pack summary */}
-      {packSize > 0 && (
-        <div>
-          <div style={{ fontSize: 11, color: '#555', marginBottom: 8 }}>
-            Current Pack ({packSize} cards)
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {[...(enrichedPack ?? [])].slice(0, 15).map((card, i) => {
-              const isRec = recommendation?.primary?.grpId === card.grpId;
-              return (
-                <div key={card.grpId ?? i} style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '3px 8px', borderRadius: 3,
-                  background: isRec ? 'rgba(80,200,120,0.07)' : 'transparent',
-                  border: `1px solid ${isRec ? 'rgba(80,200,120,0.2)' : 'transparent'}`,
-                }}>
-                  {isRec && <span style={{ fontSize: 10, color: '#7ec8a0' }}>★</span>}
-                  {!isRec && <div style={{ width: 14 }} />}
-                  <span style={{ flex: 1, fontSize: 12, color: '#c8c8c8' }}>
-                    {card.name ?? `#${card.grpId}`}
-                  </span>
-                  {card.stats?.grade && (
-                    <span style={{ fontSize: 11, fontWeight: 700, color: GRADE_COLORS[card.stats.grade] ?? '#888', minWidth: 24, textAlign: 'right' }}>
-                      {card.stats.grade}
-                    </span>
-                  )}
-                  {card.stats?.gihwr != null && (
-                    <span style={{ fontSize: 10, color: '#666', minWidth: 40, textAlign: 'right', fontFamily: 'monospace' }}>
-                      {pct(card.stats.gihwr)}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Sort + pack info bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <span style={{ fontSize: 11, color: '#555', flex: 1 }}>
+          Pack ({(enrichedPack ?? []).length} cards) — sorted by
+        </span>
+        <select
+          value={sortBy}
+          onChange={(e) => handleSortChange(e.target.value)}
+          style={{
+            background: 'rgba(30,30,50,0.9)', border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 4, color: '#c8c8c8', fontSize: 11, padding: '3px 6px', cursor: 'pointer',
+          }}
+        >
+          {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
 
-      {/* Picked cards summary */}
-      {pickedCards?.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, color: '#555', marginBottom: 4 }}>
-            Picked ({pickedCards.length})
+      {/* Color filter */}
+      <div style={{ flexShrink: 0 }}>
+        <ColorFilter value={colorFilter} onChange={handleColorChange} />
+      </div>
+
+      {/* Sorted card list */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {sortedFiltered.length === 0 ? (
+          <div style={{ padding: '20px 16px', fontSize: 11, color: '#444', textAlign: 'center' }}>
+            No cards match the color filter.
           </div>
-          <div style={{ fontSize: 11, color: '#444' }}>
-            {pickedCards.slice(-5).map((c, i) => c.name ?? `#${c.grpId}`).join(', ')}
-            {pickedCards.length > 5 && ` ... +${pickedCards.length - 5} more`}
+        ) : (
+          sortedFiltered.map((card, i) => (
+            <CardRow
+              key={card.grpId ?? i}
+              card={card}
+              columns={columns}
+              compact={compact}
+              isTopPick={i === 0}
+              isRecommended={recommendedGrpId != null && card.grpId === recommendedGrpId}
+            />
+          ))
+        )}
+      </div>
+
+      {/* Picked cards */}
+      {pickedCards?.length > 0 && (
+        <div style={{ padding: '6px 14px', borderTop: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: '#555', marginBottom: 3 }}>Picked ({pickedCards.length})</div>
+          <div style={{ fontSize: 11, color: '#444', lineHeight: 1.5 }}>
+            {pickedCards.slice(-6).map((c) => c.name ?? `#${c.grpId}`).join(', ')}
+            {pickedCards.length > 6 && ` … +${pickedCards.length - 6} more`}
           </div>
         </div>
       )}

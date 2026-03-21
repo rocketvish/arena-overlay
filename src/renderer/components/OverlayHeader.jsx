@@ -15,21 +15,6 @@ const FORMAT_SHORT = {
   TradDraft: 'Traditional', Sealed: 'Sealed',
 };
 
-const SORT_OPTIONS = [
-  { value: 'grade',  label: 'Grade' },
-  { value: 'gihwr', label: 'GIH%' },
-  { value: 'ohwr',  label: 'OH%' },
-  { value: 'color', label: 'Color' },
-  { value: 'name',  label: 'Name' },
-];
-
-const STATUS_LABELS = {
-  watching: 'Watching for Arena…',
-  'arena-detected': 'Arena detected',
-  'log-not-found': 'Log file not found — check settings',
-  error: 'Watcher error',
-};
-
 function useAgo(timestamp) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -47,13 +32,11 @@ function useAgo(timestamp) {
 
 export default function OverlayHeader({
   setCode, format, inDraft, packNumber, pickNumber, totalPicks,
-  sortBy, onSortChange, status, isInteractable, isMinimized,
-  onToggleMinimize, onToggleInteract, onOpenSettings, landsStatus,
-  lastLogUpdate,
+  isInteractable, isMinimized, onToggleMinimize, onToggleInteract,
+  landsStatus, lastLogUpdate,
 }) {
   const setName = setCode ? (SET_NAMES[setCode] ?? setCode) : null;
   const formatShort = FORMAT_SHORT[format] ?? format ?? 'Premier';
-  const statusLabel = STATUS_LABELS[status] ?? status ?? 'Watching…';
   const ago = useAgo(lastLogUpdate);
 
   return (
@@ -65,8 +48,8 @@ export default function OverlayHeader({
       WebkitAppRegion: isInteractable ? 'drag' : 'no-drag',
     }}>
       {/* ── Top row ── */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '5px 10px', gap: 6, minHeight: 34 }}>
-        {/* Left: set name or status */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '5px 10px', gap: 6, minHeight: 28 }}>
+        {/* Left: set name or idle */}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {inDraft && setName ? (
             <span style={{ fontSize: 11, color: '#c8c8c8', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>
@@ -74,53 +57,39 @@ export default function OverlayHeader({
               <span style={{ color: '#555', fontWeight: 400, marginLeft: 5 }}>— {formatShort}</span>
             </span>
           ) : (
-            <span style={{ fontSize: 11, color: landsStatus === 'error' ? '#f08080' : '#666' }}>
-              {landsStatus === 'fetching' ? '⟳ Loading 17Lands…' :
-               landsStatus === 'error'    ? '⚠ 17Lands unavailable' :
-               statusLabel}
+            <span style={{ fontSize: 10, color: landsStatus === 'fetching' ? '#7ec8a0' : '#444' }}>
+              {landsStatus === 'fetching' ? '⟳ Loading…' : 'Waiting for draft…'}
             </span>
           )}
         </div>
 
-        {/* Last log update indicator */}
+        {/* Last log update */}
         {ago && (
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)', flexShrink: 0, WebkitAppRegion: 'no-drag' }}
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', flexShrink: 0, WebkitAppRegion: 'no-drag' }}
                 title="Last log activity">
             ● {ago}
           </span>
         )}
 
-        {/* Right: controls (drag-exempt) */}
-        {isInteractable && (
-          <div style={{ display: 'flex', gap: 4, WebkitAppRegion: 'no-drag', flexShrink: 0 }}>
-            {inDraft && (
-              <select
-                value={sortBy}
-                onChange={(e) => onSortChange(e.target.value)}
-                title="Sort cards by"
-                style={{
-                  background: 'rgba(30,30,50,0.95)', border: '1px solid rgba(255,255,255,0.12)',
-                  borderRadius: 3, color: '#bbb', fontSize: 10, padding: '2px 4px', cursor: 'pointer',
-                }}
-              >
-                {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            )}
-            <IconBtn title="Settings (⚙)" onClick={onOpenSettings}>⚙</IconBtn>
-            <IconBtn title="Lock overlay — Alt+D" onClick={onToggleInteract}>🔓</IconBtn>
-            <IconBtn title={isMinimized ? 'Expand' : 'Collapse'} onClick={onToggleMinimize}>
-              {isMinimized ? '▼' : '▲'}
-            </IconBtn>
-          </div>
-        )}
-        {!isInteractable && (
-          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.13)', flexShrink: 0 }}>Alt+D</span>
-        )}
+        {/* Controls (drag-exempt) */}
+        <div style={{ display: 'flex', gap: 3, WebkitAppRegion: 'no-drag', flexShrink: 0 }}>
+          {isInteractable && (
+            <>
+              <IconBtn onClick={onToggleInteract} title="Lock overlay (Alt+D)">🔒</IconBtn>
+              <IconBtn onClick={onToggleMinimize} title={isMinimized ? 'Expand' : 'Collapse'}>
+                {isMinimized ? '▼' : '▲'}
+              </IconBtn>
+            </>
+          )}
+          {!isInteractable && (
+            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.12)' }}>Alt+D</span>
+          )}
+        </div>
       </div>
 
       {/* ── Pack / pick row ── */}
       {inDraft && !isMinimized && (
-        <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px 6px', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px 5px', gap: 5 }}>
           <PackPip active={packNumber === 0} done={packNumber > 0} n={1} />
           <PackPip active={packNumber === 1} done={packNumber > 1} n={2} />
           <PackPip active={packNumber === 2} done={packNumber > 2} n={3} />
@@ -155,8 +124,8 @@ function IconBtn({ children, onClick, title }) {
   return (
     <button onClick={onClick} title={title} style={{
       background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.1)',
-      borderRadius: 3, color: '#bbb', cursor: 'pointer', fontSize: 12,
-      lineHeight: 1, padding: '3px 6px', transition: 'background 0.1s',
+      borderRadius: 3, color: '#bbb', cursor: 'pointer', fontSize: 11,
+      lineHeight: 1, padding: '2px 5px', transition: 'background 0.1s',
     }}
     onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.16)')}
     onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}

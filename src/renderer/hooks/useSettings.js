@@ -13,6 +13,10 @@ export function useSettings() {
       setSettings(s);
       setLoading(false);
     });
+
+    // Keep settings in sync when changed from any window
+    const unsub = window.electronAPI.onSettingsChanged?.((s) => setSettings(s));
+    return () => unsub?.();
   }, []);
 
   const setSetting = useCallback(async (keyPath, value) => {

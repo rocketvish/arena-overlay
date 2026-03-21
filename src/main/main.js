@@ -109,6 +109,8 @@ function registerIPC() {
     if (keyPath === 'overlay.visible') {
       value ? overlayWindow?.show() : overlayWindow?.hide();
     }
+    // Broadcast to all windows so they update in real-time
+    broadcastToAll('settings-changed', updated);
     return updated;
   });
 

@@ -142,22 +142,8 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
 
       {/* Display */}
       <Section title="Display">
-        <Select label="Default sort" value={display.sortBy ?? 'grade'}
-          options={[
-            { value: 'grade', label: 'Grade' },
-            { value: 'gihwr', label: 'GIH Win Rate' },
-            { value: 'ohwr',  label: 'OH Win Rate' },
-            { value: 'color', label: 'Color' },
-            { value: 'name',  label: 'Name' },
-          ]}
-          onChange={(v) => onSet('display.sortBy', v)} />
-        <Select label="Font size" value={display.fontSize ?? 'medium'}
-          options={[
-            { value: 'small', label: 'Small' },
-            { value: 'medium', label: 'Medium' },
-            { value: 'large', label: 'Large' },
-          ]}
-          onChange={(v) => onSet('display.fontSize', v)} />
+        <Toggle label="Show recommendation bar" description="Highlight the best pick in the overlay"
+          value={display.showRecommendation ?? true} onChange={(v) => onSet('display.showRecommendation', v)} />
         <Toggle label="Compact mode" value={display.compactMode ?? false} onChange={(v) => onSet('display.compactMode', v)} />
       </Section>
 

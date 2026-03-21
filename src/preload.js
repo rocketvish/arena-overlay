@@ -99,6 +99,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('log-updated', h);
     return () => ipcRenderer.removeListener('log-updated', h);
   },
+  onSettingsChanged: (cb) => {
+    const h = (_e, s) => cb(s);
+    ipcRenderer.on('settings-changed', h);
+    return () => ipcRenderer.removeListener('settings-changed', h);
+  },
   onUpdateAvailable: (cb) => {
     const h = () => cb();
     ipcRenderer.on('update-available', h);

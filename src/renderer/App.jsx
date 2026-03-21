@@ -1,19 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import DraftOverlay from './components/DraftOverlay';
-import SettingsPanel from './components/SettingsPanel';
 import OverlayHeader from './components/OverlayHeader';
 import { useDraftState } from './hooks/useDraftState';
 import { useSettings } from './hooks/useSettings';
 
 export default function App() {
-  const { settings, setSetting, loading: settingsLoading } = useSettings();
-  const { draftState, reEnrichWithColorPair } = useDraftState(settings);
+  const { settings, loading: settingsLoading } = useSettings();
+  const { draftState } = useDraftState(settings);
 
   const [status, setStatus] = useState('watching');
   const [isInteractable, setIsInteractable] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [sortBy, setSortBy] = useState('grade');
   const [lastLogUpdate, setLastLogUpdate] = useState(null);
 
   useEffect(() => {
@@ -21,26 +18,10 @@ export default function App() {
     const unsubs = [
       window.electronAPI.onStatusUpdate(setStatus),
       window.electronAPI.onInteractableChanged(setIsInteractable),
-      window.electronAPI.onOpenSettings(() => setShowSettings(true)),
       window.electronAPI.onLogUpdated(setLastLogUpdate),
     ];
     return () => unsubs.forEach((fn) => fn());
   }, []);
-
-  // Sync sort preference from settings on load
-  useEffect(() => {
-    if (settings?.display?.sortBy) setSortBy(settings.display.sortBy);
-  }, [settings?.display?.sortBy]);
-
-  const handleSortChange = useCallback((val) => {
-    setSortBy(val);
-    setSetting('display.sortBy', val);
-  }, [setSetting]);
-
-  const handleColorFilterChange = useCallback((val) => {
-    setSetting('display.colorFilter', val);
-    reEnrichWithColorPair(val);
-  }, [setSetting, reEnrichWithColorPair]);
 
   if (settingsLoading) return null;
 
@@ -67,33 +48,20 @@ export default function App() {
         packNumber={draftState.packNumber}
         pickNumber={draftState.pickNumber}
         totalPicks={draftState.totalPicks}
-        sortBy={sortBy}
-        onSortChange={handleSortChange}
-        status={status}
         isInteractable={isInteractable}
         isMinimized={isMinimized}
         onToggleMinimize={() => setIsMinimized((m) => !m)}
         onToggleInteract={() => window.electronAPI?.toggleInteract()}
-        onOpenSettings={() => setShowSettings(true)}
         landsStatus={draftState.landsStatus}
         lastLogUpdate={lastLogUpdate}
       />
 
       {!isMinimized && (
-        showSettings ? (
-          <SettingsPanel
-            settings={settings}
-            onSet={setSetting}
-            onClose={() => setShowSettings(false)}
-          />
-        ) : (
-          <DraftOverlay
-            draftState={draftState}
-            settings={{ ...settings, display: { ...settings?.display, sortBy } }}
-            onColorFilterChange={handleColorFilterChange}
-            recommendation={draftState.recommendation}
-          />
-        )
+        <DraftOverlay
+          draftState={draftState}
+          settings={settings}
+          recommendation={draftState.recommendation}
+        />
       )}
     </div>
   );
