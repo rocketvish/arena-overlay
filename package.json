@@ -4,7 +4,7 @@
   "description": "MTG Arena draft overlay with 17Lands stats",
   "main": "src/main/main.js",
   "scripts": {
-    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"vite\" \"wait-on tcp:5173 && cross-env ELECTRON_ENV=development electron .\"",
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"vite\" \"wait-on tcp:5173 && cross-env ELECTRON_ENV=development node scripts/start-electron.js\"",
     "build:renderer": "vite build",
     "build": "npm run build:renderer && electron-builder",
     "preview": "vite preview"

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 const SET_NAMES = {
   DSK: 'Duskmourn', BLB: 'Bloomburrow', MH3: 'Modern Horizons 3',
@@ -7,7 +7,7 @@ const SET_NAMES = {
   MOM: 'March of the Machine', ONE: 'Phyrexia: All Will Be One',
   BRO: 'The Brothers War', DMU: 'Dominaria United',
   FDN: 'Foundations', TDM: 'Tarkir: Dragonstorm',
-  FIN: 'Final Fantasy',
+  FIN: 'Final Fantasy', ECL: 'Edge of Eternities',
 };
 
 const FORMAT_SHORT = {
@@ -30,14 +30,31 @@ const STATUS_LABELS = {
   error: 'Watcher error',
 };
 
+function useAgo(timestamp) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!timestamp) return;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [timestamp]);
+
+  if (!timestamp) return null;
+  const secs = Math.floor((Date.now() - timestamp) / 1000);
+  if (secs < 5) return 'just now';
+  if (secs < 60) return `${secs}s ago`;
+  return `${Math.floor(secs / 60)}m ago`;
+}
+
 export default function OverlayHeader({
   setCode, format, inDraft, packNumber, pickNumber, totalPicks,
   sortBy, onSortChange, status, isInteractable, isMinimized,
   onToggleMinimize, onToggleInteract, onOpenSettings, landsStatus,
+  lastLogUpdate,
 }) {
   const setName = setCode ? (SET_NAMES[setCode] ?? setCode) : null;
   const formatShort = FORMAT_SHORT[format] ?? format ?? 'Premier';
   const statusLabel = STATUS_LABELS[status] ?? status ?? 'Watching…';
+  const ago = useAgo(lastLogUpdate);
 
   return (
     <div style={{
@@ -64,6 +81,14 @@ export default function OverlayHeader({
             </span>
           )}
         </div>
+
+        {/* Last log update indicator */}
+        {ago && (
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)', flexShrink: 0, WebkitAppRegion: 'no-drag' }}
+                title="Last log activity">
+            ● {ago}
+          </span>
+        )}
 
         {/* Right: controls (drag-exempt) */}
         {isInteractable && (

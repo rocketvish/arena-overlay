@@ -2,7 +2,12 @@ const { app } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
-const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
+// Lazy — app.getPath() must not be called at module load time (before app is ready)
+let SETTINGS_FILE = null;
+function getSettingsFile() {
+  if (!SETTINGS_FILE) SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
+  return SETTINGS_FILE;
+}
 
 const DEFAULT_SETTINGS = {
   overlay: {
@@ -51,9 +56,10 @@ function deepMerge(target, source) {
 }
 
 function load() {
+  const file = getSettingsFile();
   try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf-8');
       const saved = JSON.parse(raw);
       return deepMerge(DEFAULT_SETTINGS, saved);
     }
@@ -64,10 +70,11 @@ function load() {
 }
 
 function save(settings) {
+  const file = getSettingsFile();
   try {
-    const dir = path.dirname(SETTINGS_FILE);
+    const dir = path.dirname(file);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
+    fs.writeFileSync(file, JSON.stringify(settings, null, 2), 'utf-8');
   } catch (err) {
     console.error('[settings] Failed to save settings:', err.message);
   }

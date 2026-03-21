@@ -52,11 +52,12 @@ export function useDraftState(settings) {
         setDraftState((prev) => ({
           ...prev,
           landsStatus: 'loaded',
-          // Re-enrich the current pack with the newly loaded data
           enrichedPack: pendingPack.current
             ? enrich(pendingPack.current, setCode, format, prev.display?.colorFilter ?? 'all')
             : prev.enrichedPack,
         }));
+      } else if (result?.noData) {
+        setDraftState((prev) => ({ ...prev, landsStatus: 'no-data', landsError: null }));
       } else {
         setDraftState((prev) => ({
           ...prev,

@@ -14,7 +14,12 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const CACHE_DIR = path.join(app.getPath('userData'), '17lands-cache');
+// Lazy — must not call app.getPath() at module load time
+let CACHE_DIR = null;
+function getCacheDir() {
+  if (!CACHE_DIR) CACHE_DIR = path.join(app.getPath('userData'), '17lands-cache');
+  return CACHE_DIR;
+}
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MIN_SAMPLE = 200; // cards below this get flagged as low-sample
 
@@ -32,7 +37,8 @@ const memCache = new Map();
 // ─── File Cache ──────────────────────────────────────────────────────────────
 
 function ensureCacheDir() {
-  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const dir = getCacheDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function cacheKey(setCode, format, colorPair) {
@@ -42,7 +48,7 @@ function cacheKey(setCode, format, colorPair) {
 }
 
 function cacheFilePath(key) {
-  return path.join(CACHE_DIR, `${key}.json`);
+  return path.join(getCacheDir(), `${key}.json`);
 }
 
 function isCacheStale(filePath) {
@@ -111,40 +117,136 @@ function fetchJSON(url) {
   });
 }
 
-// Batch-resolve Arena IDs via Scryfall collection endpoint
-// Returns: { [grpId]: { name, cmc, colorIdentity } }
+// ─── Scryfall disk cache ──────────────────────────────────────────────────────
+
+const SCRYFALL_CACHE_FILE = 'scryfall-arena-ids.json';
+let scryfallDiskCache = null; // lazy-loaded: grpId (string) → card data
+
+function getScryfallCacheFile() {
+  return path.join(getCacheDir(), SCRYFALL_CACHE_FILE);
+}
+
+function loadScryfallCache() {
+  if (scryfallDiskCache !== null) return scryfallDiskCache;
+  try {
+    ensureCacheDir();
+    const fp = getScryfallCacheFile();
+    scryfallDiskCache = fs.existsSync(fp)
+      ? JSON.parse(fs.readFileSync(fp, 'utf-8'))
+      : {};
+  } catch {
+    scryfallDiskCache = {};
+  }
+  return scryfallDiskCache;
+}
+
+function saveScryfallCache() {
+  try {
+    ensureCacheDir();
+    fs.writeFileSync(getScryfallCacheFile(), JSON.stringify(scryfallDiskCache), 'utf-8');
+  } catch (e) {
+    console.error('[17lands] Scryfall cache write error:', e.message);
+  }
+}
+
+function scryfallCardData(card) {
+  return {
+    name: card.name,
+    cmc: card.cmc ?? null,
+    colorIdentity: card.color_identity?.join('') ?? (card.colors?.join('') ?? ''),
+    rarity: card.rarity ?? 'common',
+  };
+}
+
+// Individual fallback for cards not in the batch response (e.g. brand-new sets)
+async function fetchScryfallById(grpId) {
+  return new Promise((resolve) => {
+    const req = https.get(
+      `https://api.scryfall.com/cards/arena/${grpId}`,
+      { headers: { 'User-Agent': 'ArenaOverlay/0.2', Accept: 'application/json' } },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            if (res.statusCode !== 200) { resolve(null); return; }
+            resolve(scryfallCardData(JSON.parse(Buffer.concat(chunks).toString('utf-8'))));
+          } catch { resolve(null); }
+        });
+        res.on('error', () => resolve(null));
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.setTimeout(10000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+// Batch-resolve Arena IDs via Scryfall, with individual fallback for misses
+// Returns: { [grpId]: { name, cmc, colorIdentity, rarity } }
 async function resolveArenaIds(grpIds) {
   if (!grpIds || grpIds.length === 0) return {};
 
-  // Build request body — Scryfall accepts up to 75 per request
-  const BATCH = 75;
+  const cache = loadScryfallCache();
   const result = {};
+  const missing = [];
 
-  for (let i = 0; i < grpIds.length; i += BATCH) {
-    const batch = grpIds.slice(i, i + BATCH);
-    const body = JSON.stringify({
-      identifiers: batch.map((id) => ({ arena_id: id })),
-    });
+  // Serve already-cached IDs immediately
+  for (const id of grpIds) {
+    const hit = cache[String(id)];
+    if (hit) result[id] = hit;
+    else missing.push(id);
+  }
+
+  if (missing.length === 0) return result;
+
+  // Batch endpoint (up to 75 per request)
+  const BATCH = 75;
+  const unresolved = [];
+
+  for (let i = 0; i < missing.length; i += BATCH) {
+    const batch = missing.slice(i, i + BATCH);
+    const body = JSON.stringify({ identifiers: batch.map((id) => ({ arena_id: id })) });
 
     try {
       const data = await postJSON('https://api.scryfall.com/cards/collection', body);
+      const resolvedSet = new Set();
       if (data && Array.isArray(data.data)) {
         for (const card of data.data) {
           if (card.arena_id != null) {
-            result[card.arena_id] = {
-              name: card.name,
-              cmc: card.cmc ?? null,
-              colorIdentity: card.color_identity?.join('') ?? (card.colors?.join('') ?? ''),
-              rarity: card.rarity ?? 'common',
-            };
+            const d = scryfallCardData(card);
+            result[card.arena_id] = d;
+            cache[String(card.arena_id)] = d;
+            resolvedSet.add(card.arena_id);
           }
         }
       }
+      for (const id of batch) {
+        if (!resolvedSet.has(id)) unresolved.push(id);
+      }
     } catch (e) {
       console.error('[17lands] Scryfall batch error:', e.message);
+      unresolved.push(...batch);
     }
   }
 
+  // Individual fallback for IDs the batch missed (brand-new cards, etc.)
+  if (unresolved.length > 0) {
+    console.log(`[17lands] Scryfall individual fallback for ${unresolved.length} IDs`);
+    const settled = await Promise.all(
+      unresolved.map(async (id) => ({ id, d: await fetchScryfallById(id) }))
+    );
+    for (const { id, d } of settled) {
+      if (d) {
+        result[id] = d;
+        cache[String(id)] = d;
+        console.log(`[17lands] Resolved via individual: ${id} → ${d.name}`);
+      } else {
+        console.warn(`[17lands] Could not resolve Arena ID: ${id}`);
+      }
+    }
+  }
+
+  saveScryfallCache();
   return result;
 }
 
@@ -244,6 +346,7 @@ const RARITY_MAP = { C: 'common', U: 'uncommon', R: 'rare', M: 'mythic' };
 function normalizeCard(c) {
   return {
     name: c.name,
+    mtgaId: c.mtga_id ?? null, // Arena grpId — present in 17Lands raw data
     color: c.color ?? '',
     rarity: RARITY_MAP[(c.rarity ?? '').toUpperCase()] ?? 'common',
     cmc: c.cmc ?? null,
@@ -293,8 +396,13 @@ async function fetchSetData(setCode, format = 'PremierDraft', win = null) {
 
   try {
     const raw = await fetchJSON(url);
-    if (!Array.isArray(raw) || raw.length === 0) {
-      throw new Error('Empty or invalid response from 17Lands');
+    if (!Array.isArray(raw)) {
+      throw new Error('Invalid response from 17Lands');
+    }
+    if (raw.length === 0) {
+      console.log(`[17lands] No data available for ${setCode} ${fmtParam} (set may be too new)`);
+      sendStatus(win, { status: 'no-data', setCode, format });
+      return { data: null, noData: true };
     }
 
     const withGrades = attachGrades(raw);
@@ -357,18 +465,20 @@ function clearCache(setCode, format) {
   ensureCacheDir();
   if (setCode) {
     const prefix = format ? `${setCode}_${format}` : setCode;
+    const dir = getCacheDir();
     try {
-      for (const f of fs.readdirSync(CACHE_DIR)) {
-        if (f.startsWith(prefix)) fs.unlinkSync(path.join(CACHE_DIR, f));
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(prefix)) fs.unlinkSync(path.join(dir, f));
       }
     } catch {}
     for (const k of memCache.keys()) {
       if (k.startsWith(setCode)) memCache.delete(k);
     }
   } else {
+    const dir = getCacheDir();
     try {
-      for (const f of fs.readdirSync(CACHE_DIR)) {
-        fs.unlinkSync(path.join(CACHE_DIR, f));
+      for (const f of fs.readdirSync(dir)) {
+        fs.unlinkSync(path.join(dir, f));
       }
     } catch {}
     memCache.clear();

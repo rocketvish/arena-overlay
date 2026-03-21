@@ -14,6 +14,9 @@
 // setCode+format → Map<normalizedName, NormalizedCard>
 const setLookup = new Map();
 
+// setCode+format → Map<mtgaId (number), NormalizedCard>
+const idLookup = new Map();
+
 // grpId → { name, cmc, colorIdentity, rarity }  (from Scryfall)
 const scryfallCache = new Map();
 
@@ -45,14 +48,15 @@ function normalizeName(name) {
  */
 export function loadSetData(setCode, format, cards) {
   const key = `${setCode}:${format}`;
-  const map = new Map();
+  const nameMap = new Map();
+  const idMap = new Map();
   for (const card of cards) {
-    if (card.name) {
-      map.set(normalizeName(card.name), card);
-    }
+    if (card.name) nameMap.set(normalizeName(card.name), card);
+    if (card.mtgaId != null) idMap.set(card.mtgaId, card);
   }
-  setLookup.set(key, map);
-  console.log(`[cardMatcher] Loaded ${map.size} cards for ${key}`);
+  setLookup.set(key, nameMap);
+  idLookup.set(key, idMap);
+  console.log(`[cardMatcher] Loaded ${nameMap.size} cards for ${key} (${idMap.size} with Arena IDs)`);
 }
 
 /**
@@ -75,6 +79,9 @@ export function clearSetData(setCode) {
   for (const k of setLookup.keys()) {
     if (!setCode || k.startsWith(setCode)) setLookup.delete(k);
   }
+  for (const k of idLookup.keys()) {
+    if (!setCode || k.startsWith(setCode)) idLookup.delete(k);
+  }
 }
 
 // ─── Scryfall Cache ───────────────────────────────────────────────────────────
@@ -92,26 +99,30 @@ export function getCachedCard(grpId) {
 // ─── Card Matching ────────────────────────────────────────────────────────────
 
 /**
+ * Look up a card by Arena grpId directly against 17Lands data.
+ */
+function lookupByGrpId(grpId, setCode, format) {
+  if (!grpId || !setCode) return null;
+  const baseKey = `${setCode}:${format}`;
+  return idLookup.get(baseKey)?.get(grpId) ?? null;
+}
+
+/**
  * Look up a card by name against 17Lands data.
- * Tries exact normalized match first, then color-pair overlay if active.
+ * Tries color-pair overlay first, then base set data.
  */
 function lookupByName(name, setCode, format, colorPair) {
   if (!name) return null;
   const norm = normalizeName(name);
 
-  // Color-pair lookup takes priority
   if (colorPair && colorPair !== 'all') {
     const pairKey = `${setCode}:${format}:${colorPair}`;
-    const pairMap = setLookup.get(pairKey);
-    if (pairMap) {
-      const hit = pairMap.get(norm);
-      if (hit) return hit;
-    }
+    const hit = setLookup.get(pairKey)?.get(norm);
+    if (hit) return hit;
   }
 
   const baseKey = `${setCode}:${format}`;
-  const baseMap = setLookup.get(baseKey);
-  return baseMap ? (baseMap.get(norm) ?? null) : null;
+  return setLookup.get(baseKey)?.get(norm) ?? null;
 }
 
 /**
@@ -129,17 +140,26 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
   if (!cards || cards.length === 0) return [];
 
   return cards.map((card) => {
-    // Resolve name: prefer what came from the log, fall back to Scryfall cache
+    // 1. Try direct grpId → 17Lands lookup (works when 17Lands includes mtga_id)
+    const byId = setCode ? lookupByGrpId(card.grpId, setCode, format) : null;
+
+    // 2. Resolve name: prefer log name → Scryfall cache → 17Lands by-id name
     let name = card.name;
     let scryfallData = null;
-
     if (!name && card.grpId) {
       scryfallData = scryfallCache.get(card.grpId);
-      name = scryfallData?.name;
+      name = scryfallData?.name ?? byId?.name ?? null;
     }
 
-    // Look up 17Lands stats
-    const lands = setCode ? lookupByName(name, setCode, format, colorPair) : null;
+    // 3. Name-based 17Lands lookup (used when byId didn't hit, e.g. color-pair overlay)
+    const byName = (!byId && name && setCode)
+      ? lookupByName(name, setCode, format, colorPair)
+      : null;
+
+    // For color-pair overlay, prefer byName (which uses pair data) over byId (which uses base)
+    const lands = (colorPair && colorPair !== 'all')
+      ? (byName ?? byId)
+      : (byId ?? byName);
 
     return {
       grpId: card.grpId,

@@ -14,6 +14,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [sortBy, setSortBy] = useState('grade');
+  const [lastLogUpdate, setLastLogUpdate] = useState(null);
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -21,6 +22,7 @@ export default function App() {
       window.electronAPI.onStatusUpdate(setStatus),
       window.electronAPI.onInteractableChanged(setIsInteractable),
       window.electronAPI.onOpenSettings(() => setShowSettings(true)),
+      window.electronAPI.onLogUpdated(setLastLogUpdate),
     ];
     return () => unsubs.forEach((fn) => fn());
   }, []);
@@ -74,6 +76,7 @@ export default function App() {
         onToggleInteract={() => window.electronAPI?.toggleInteract()}
         onOpenSettings={() => setShowSettings(true)}
         landsStatus={draftState.landsStatus}
+        lastLogUpdate={lastLogUpdate}
       />
 
       {!isMinimized && (

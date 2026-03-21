@@ -53,16 +53,19 @@ function ColHeaders({ columns, compact }) {
 function LoadingBanner({ landsStatus, landsError }) {
   if (!landsStatus || landsStatus === 'loaded') return null;
   const isFetching = landsStatus === 'fetching';
+  const isNoData = landsStatus === 'no-data';
+  const bg = isFetching ? 'rgba(40,80,40,0.3)' : isNoData ? 'rgba(60,60,20,0.4)' : 'rgba(80,30,30,0.35)';
+  const color = isFetching ? '#7ec8a0' : isNoData ? '#c8c060' : '#e08080';
   return (
     <div style={{
-      padding: '5px 10px', fontSize: 10,
-      background: isFetching ? 'rgba(40,80,40,0.3)' : 'rgba(80,30,30,0.35)',
-      color: isFetching ? '#7ec8a0' : '#e08080',
+      padding: '5px 10px', fontSize: 10, background: bg, color,
       borderBottom: '1px solid rgba(255,255,255,0.04)',
       display: 'flex', alignItems: 'center', gap: 6,
     }}>
       {isFetching ? (
         <><span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</span> Loading 17Lands data…</>
+      ) : isNoData ? (
+        <><span>ℹ</span> 17Lands data not yet available for this set. Showing card names only.</>
       ) : (
         <><span>⚠</span> 17Lands unavailable{landsError ? ` — ${landsError}` : ''}. Showing names only.</>
       )}
