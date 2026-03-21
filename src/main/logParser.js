@@ -95,6 +95,11 @@ let state = {
   pickedCards: [],
 };
 
+// Track the last emitted pack-opened so we can deduplicate.
+// Arena periodically re-writes the full draft state to the log, which would
+// otherwise cause the same pack to be emitted on every heartbeat.
+let lastEmittedPack = { packNumber: null, pickNumber: null };
+
 // ─── Format detection ─────────────────────────────────────────────────────────
 
 let detectedFormat = null; // 'arena-2026' | 'legacy' | null
@@ -144,6 +149,7 @@ function reset() {
   };
   pendingEndpoint = null;
   pendingBuffer   = '';
+  lastEmittedPack = { packNumber: null, pickNumber: null };
 }
 
 function parseLine(line, broadcast) {
@@ -372,6 +378,16 @@ function handleDraftPayload(payload) {
     console.log(`[parser] draft-started setCode=${state.setCode}`);
     emit('draft-started', { setCode: state.setCode });
   }
+
+  // Deduplicate: Arena periodically re-logs the current draft state, so the
+  // same (packNumber, pickNumber) can appear many times. Only emit when the
+  // pick actually advances.
+  if (state.packNumber === lastEmittedPack.packNumber &&
+      state.pickNumber === lastEmittedPack.pickNumber) {
+    appLogger.log('parser', 'debug', `pack-opened deduped pack=${state.packNumber} pick=${state.pickNumber}`);
+    return;
+  }
+  lastEmittedPack = { packNumber: state.packNumber, pickNumber: state.pickNumber };
 
   appLogger.log('parser', 'info', `pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} set=${state.setCode}`);
   console.log(`[parser] pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} set=${state.setCode}`);
