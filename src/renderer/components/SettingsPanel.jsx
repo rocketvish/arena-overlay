@@ -122,7 +122,6 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
       <Section title="Overlay">
         <Slider label="Opacity" value={overlay.opacity ?? 0.85} min={0.1} max={1} step={0.05}
           onChange={(v) => onSet('overlay.opacity', v)} format={(v) => `${Math.round(v * 100)}%`} />
-        <Toggle label="Visible on launch" value={overlay.visible ?? true} onChange={(v) => onSet('overlay.visible', v)} />
       </Section>
 
       {/* Stat columns */}

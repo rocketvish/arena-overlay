@@ -108,6 +108,7 @@ function registerIPC() {
     if (keyPath === 'overlay.opacity') overlayWindow?.setOpacity(value);
     if (keyPath === 'overlay.visible') {
       value ? overlayWindow?.show() : overlayWindow?.hide();
+      broadcastToAll('overlay-visibility-changed', value);
     }
     // Broadcast to all windows so they update in real-time
     broadcastToAll('settings-changed', updated);
@@ -120,7 +121,16 @@ function registerIPC() {
   ipcMain.on('overlay:toggle-interact', () => setClickThrough(isInteractable));
   ipcMain.on('overlay:toggle-visibility', () => {
     if (!overlayWindow) return;
-    overlayWindow.isVisible() ? overlayWindow.hide() : overlayWindow.show();
+    const nowVisible = !overlayWindow.isVisible();
+    nowVisible ? overlayWindow.show() : overlayWindow.hide();
+    broadcastToAll('overlay-visibility-changed', nowVisible);
+  });
+  ipcMain.handle('overlay:get-visible', () => overlayWindow?.isVisible() ?? false);
+  ipcMain.handle('overlay:set-visible', (_event, visible) => {
+    if (!overlayWindow) return false;
+    visible ? overlayWindow.show() : overlayWindow.hide();
+    broadcastToAll('overlay-visibility-changed', visible);
+    return visible;
   });
 
   // ── Log watcher ───────────────────────────────────────────────────────────

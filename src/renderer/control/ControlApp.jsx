@@ -17,6 +17,7 @@ export default function ControlApp() {
   const [activeTab, setActiveTab] = useState('draft');
   const [status, setStatus] = useState('watching');
   const [watcherRunning, setWatcherRunning] = useState(true);
+  const [overlayVisible, setOverlayVisible] = useState(true);
   const [updateAvailable, setUpdateAvailable] = useState(false);
 
   useEffect(() => {
@@ -24,14 +25,22 @@ export default function ControlApp() {
     const unsubs = [
       window.electronAPI.onStatusUpdate(setStatus),
       window.electronAPI.onUpdateAvailable?.(() => setUpdateAvailable(true)),
+      window.electronAPI.onOverlayVisibilityChanged?.((v) => setOverlayVisible(v)),
     ].filter(Boolean);
 
     window.electronAPI.getWatcherStatus?.().then((s) => {
       if (s) setWatcherRunning(s.running);
     });
+    window.electronAPI.getOverlayVisible?.().then((v) => setOverlayVisible(v));
 
     return () => unsubs.forEach((fn) => fn());
   }, []);
+
+  const handleToggleOverlay = useCallback(async () => {
+    const newVisible = !overlayVisible;
+    await window.electronAPI?.setOverlayVisible?.(newVisible);
+    setOverlayVisible(newVisible);
+  }, [overlayVisible]);
 
   const handleToggleWatcher = useCallback(async () => {
     if (!window.electronAPI) return;
@@ -85,10 +94,26 @@ export default function ControlApp() {
 
         <div style={{ flex: 1 }} />
 
+        {/* Show / Hide overlay — primary action */}
+        <button
+          onClick={handleToggleOverlay}
+          style={{
+            margin: '4px 4px 4px 0', padding: '4px 14px', fontSize: 11, fontWeight: 600,
+            background: overlayVisible ? 'rgba(200,60,60,0.25)' : 'rgba(60,200,100,0.25)',
+            border: `1px solid ${overlayVisible ? 'rgba(200,60,60,0.5)' : 'rgba(60,200,100,0.5)'}`,
+            borderRadius: 4,
+            color: overlayVisible ? '#e07070' : '#60d888',
+            cursor: 'pointer',
+          }}
+          title={overlayVisible ? 'Hide the overlay window' : 'Show the overlay window'}
+        >
+          {overlayVisible ? 'Hide Overlay' : 'Show Overlay'}
+        </button>
+
         <button
           onClick={handleToggleWatcher}
           style={{
-            margin: '4px 8px', padding: '4px 12px', fontSize: 11,
+            margin: '4px 8px 4px 0', padding: '4px 12px', fontSize: 11,
             background: watcherRunning ? 'rgba(200,80,80,0.2)' : 'rgba(80,200,120,0.2)',
             border: `1px solid ${watcherRunning ? 'rgba(200,80,80,0.4)' : 'rgba(80,200,120,0.4)'}`,
             borderRadius: 4,

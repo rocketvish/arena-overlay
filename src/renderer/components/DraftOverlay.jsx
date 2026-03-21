@@ -1,5 +1,44 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import CardRow from './CardRow';
+
+// ── Arena visual sort ─────────────────────────────────────────────────────────
+// Matches Arena's on-screen pack layout: Rare/Mythic → Uncommon → Common,
+// within rarity by color (W U B R G Multi Colorless), then CMC asc, then name.
+const RARITY_ORDER = { mythic: 0, rare: 1, uncommon: 2, common: 3 };
+const COLOR_ORDER  = { W: 0, U: 1, B: 2, R: 3, G: 4 };
+
+function colorKey(color) {
+  const c = (color ?? '').replace(/[^WUBRG]/g, '');
+  if (c.length === 0) return 6; // colorless/artifact
+  if (c.length > 1)  return 5; // multicolor
+  return COLOR_ORDER[c] ?? 6;
+}
+
+function arenaVisualSort(cards) {
+  return cards.map((c, i) => ({ card: c, i })).sort((a, b) => {
+    const ca = a.card, cb = b.card;
+    // Cards without 17Lands stats have no reliable rarity/color/cmc — keep log order
+    const hasA = ca.stats !== null;
+    const hasB = cb.stats !== null;
+    if (!hasA && !hasB) return a.i - b.i;
+    if (!hasA) return 1;
+    if (!hasB) return -1;
+
+    const rA = RARITY_ORDER[ca.rarity] ?? 4;
+    const rB = RARITY_ORDER[cb.rarity] ?? 4;
+    if (rA !== rB) return rA - rB;
+
+    const cA = colorKey(ca.color);
+    const cB = colorKey(cb.color);
+    if (cA !== cB) return cA - cB;
+
+    const mA = ca.cmc ?? 999;
+    const mB = cb.cmc ?? 999;
+    if (mA !== mB) return mA - mB;
+
+    return (ca.name ?? '').localeCompare(cb.name ?? '');
+  }).map(({ card }) => card);
+}
 
 // ── Column header row ─────────────────────────────────────────────────────────
 function ColHeaders({ columns, compact }) {
@@ -88,8 +127,16 @@ export default function DraftOverlay({ draftState, settings, recommendation }) {
 
   const { inDraft, enrichedPack, pickedCards, landsStatus, landsError } = draftState;
 
-  // Always show cards in pack order — no sorting or filtering
-  const cards = enrichedPack ?? [];
+  // Sort to match Arena's visual pack layout (rarity → color → cmc → name)
+  const cards = useMemo(() => {
+    const sorted = arenaVisualSort(enrichedPack ?? []);
+    if (sorted.length > 0) {
+      console.log('[overlay] Pack order:', sorted.map((c, i) =>
+        `${i + 1}. ${c.name ?? `#${c.grpId}`} (${c.rarity?.[0]?.toUpperCase() ?? '?'} ${c.color || 'C'} ${c.cmc ?? '?'})`
+      ).join('\n'));
+    }
+    return sorted;
+  }, [enrichedPack]);
 
   const recommendedGrpId = recommendation?.primary?.grpId ?? null;
 

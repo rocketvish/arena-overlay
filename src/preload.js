@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Overlay controls ──────────────────────────────────────────────────────
   toggleInteract: () => ipcRenderer.send('overlay:toggle-interact'),
   toggleVisibility: () => ipcRenderer.send('overlay:toggle-visibility'),
+  getOverlayVisible: () => ipcRenderer.invoke('overlay:get-visible'),
+  setOverlayVisible: (visible) => ipcRenderer.invoke('overlay:set-visible', visible),
 
   // ── Log watcher ───────────────────────────────────────────────────────────
   restartLogWatcher: () => ipcRenderer.send('log-watcher:restart'),
@@ -103,6 +105,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const h = (_e, s) => cb(s);
     ipcRenderer.on('settings-changed', h);
     return () => ipcRenderer.removeListener('settings-changed', h);
+  },
+  onOverlayVisibilityChanged: (cb) => {
+    const h = (_e, v) => cb(v);
+    ipcRenderer.on('overlay-visibility-changed', h);
+    return () => ipcRenderer.removeListener('overlay-visibility-changed', h);
   },
   onUpdateAvailable: (cb) => {
     const h = () => cb();
