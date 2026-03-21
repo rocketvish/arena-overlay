@@ -85,11 +85,15 @@ function ata(v) { return v != null ? v.toFixed(1) : null; }
 function iwd(v) { return v != null ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}` : null; }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function CardRow({ card, columns, compact, isTopPick }) {
+export default function CardRow({ card, columns, compact, isTopPick, isRecommended }) {
   const { name, color, rarity, stats } = card;
   const grade = stats?.grade ?? null;
   const lowSample = stats?.lowSample ?? false;
   const rarityColor = RARITY_COLOR[rarity] ?? '#a0a0a0';
+  const highlighted = isRecommended || isTopPick;
+  const baseBg = isRecommended
+    ? 'rgba(80,200,120,0.10)'
+    : isTopPick ? 'rgba(80,200,120,0.06)' : 'transparent';
 
   function handleContextMenu(e) {
     e.preventDefault();
@@ -106,16 +110,20 @@ export default function CardRow({ card, columns, compact, isTopPick }) {
         display: 'flex', alignItems: 'center', gap: 5,
         padding: compact ? '2px 8px' : '4px 8px',
         borderBottom: '1px solid rgba(255,255,255,0.04)',
-        background: isTopPick ? 'rgba(80,200,120,0.06)' : 'transparent',
+        background: baseBg,
+        border: isRecommended ? '1px solid rgba(80,200,120,0.25)' : '1px solid transparent',
         transition: 'background 0.12s',
         opacity: lowSample ? 0.65 : 1,
         cursor: 'context-menu',
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = isTopPick ? 'rgba(80,200,120,0.06)' : 'transparent')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = baseBg)}
     >
-      {/* Color pip */}
-      <ColorPip color={color} />
+      {/* Recommended star or color pip */}
+      {isRecommended
+        ? <span style={{ fontSize: 8, color: '#7ec8a0', flexShrink: 0, width: 8, textAlign: 'center' }}>★</span>
+        : <ColorPip color={color} />
+      }
 
       {/* Grade badge */}
       {columns.grade && <GradeBadge grade={grade} />}

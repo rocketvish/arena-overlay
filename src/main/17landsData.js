@@ -486,8 +486,14 @@ function clearCache(setCode, format) {
 }
 
 function sendStatus(win, payload) {
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('17lands-status', payload);
+  // win can be a BrowserWindow, a broadcastFn object { send: fn }, or a direct function
+  if (!win) return;
+  if (typeof win === 'function') {
+    win('17lands-status', payload);
+  } else if (typeof win?.send === 'function') {
+    win.send('17lands-status', payload);
+  } else if (win && !win.isDestroyed?.()) {
+    win.webContents?.send('17lands-status', payload);
   }
 }
 

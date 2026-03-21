@@ -91,6 +91,7 @@ export default function App() {
             draftState={draftState}
             settings={{ ...settings, display: { ...settings?.display, sortBy } }}
             onColorFilterChange={handleColorFilterChange}
+            recommendation={draftState.recommendation}
           />
         )
       )}

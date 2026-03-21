@@ -5,21 +5,19 @@ let tray = null;
 let statusText = 'Watching for Arena...';
 
 function createTrayIcon() {
-  // Create a simple 16x16 colored icon using nativeImage
-  // Replace with a real icon file (assets/tray-icon.png) for production
   const iconPath = path.join(app.getAppPath(), 'assets', 'tray-icon.png');
   let icon;
   try {
     icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) throw new Error('empty');
   } catch {
-    // Fallback: 16x16 red square as a data URI
+    // Fallback: 16x16 colored square as raw RGBA buffer
     const size = 16;
     const buf = Buffer.alloc(size * size * 4);
     for (let i = 0; i < size * size; i++) {
-      buf[i * 4] = 180;     // R
-      buf[i * 4 + 1] = 40; // G
-      buf[i * 4 + 2] = 40; // B
+      buf[i * 4]     = 80;  // R
+      buf[i * 4 + 1] = 130; // G
+      buf[i * 4 + 2] = 220; // B
       buf[i * 4 + 3] = 255; // A
     }
     icon = nativeImage.createFromBuffer(buf, { width: size, height: size });
@@ -27,20 +25,33 @@ function createTrayIcon() {
   return icon;
 }
 
-function create(overlayWindow) {
+function create(overlayWindow, controlWindow) {
   const icon = createTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip('Arena Overlay');
-  updateMenu(overlayWindow);
+  updateMenu(overlayWindow, controlWindow);
+
+  // Single left-click: show control window
+  tray.on('click', () => {
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      if (controlWindow.isVisible()) {
+        controlWindow.focus();
+      } else {
+        controlWindow.show();
+        controlWindow.focus();
+      }
+    }
+  });
+
   return tray;
 }
 
-function updateStatus(text, overlayWindow) {
+function updateStatus(text, overlayWindow, controlWindow) {
   statusText = text;
-  if (tray && overlayWindow) updateMenu(overlayWindow);
+  if (tray && overlayWindow) updateMenu(overlayWindow, controlWindow);
 }
 
-function updateMenu(overlayWindow) {
+function updateMenu(overlayWindow, controlWindow) {
   if (!tray) return;
 
   const contextMenu = Menu.buildFromTemplate([
@@ -50,34 +61,46 @@ function updateMenu(overlayWindow) {
     },
     { type: 'separator' },
     {
-      label: 'Show / Hide Overlay',
+      label: 'Show Control Window',
       click: () => {
-        if (overlayWindow.isVisible()) {
-          overlayWindow.hide();
-        } else {
-          overlayWindow.show();
+        if (controlWindow && !controlWindow.isDestroyed()) {
+          controlWindow.show();
+          controlWindow.focus();
         }
       },
     },
     {
-      label: 'Settings',
+      label: 'Show / Hide Overlay',
       click: () => {
-        overlayWindow.show();
-        overlayWindow.webContents.send('open-settings');
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+          if (overlayWindow.isVisible()) {
+            overlayWindow.hide();
+          } else {
+            overlayWindow.show();
+          }
+        }
       },
     },
+    { type: 'separator' },
     {
-      label: 'Restart Log Watcher',
+      label: 'Check for Updates',
       click: () => {
-        overlayWindow.webContents.send('restart-log-watcher');
-        const { startWatching } = require('./logWatcher');
-        startWatching(overlayWindow);
+        try {
+          const { autoUpdater } = require('electron-updater');
+          autoUpdater.checkForUpdates();
+        } catch {
+          // electron-updater not available in dev
+          console.log('[tray] Check for updates: electron-updater not available');
+        }
       },
     },
     { type: 'separator' },
     {
       label: 'Quit',
-      click: () => app.quit(),
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      },
     },
   ]);
 

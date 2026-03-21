@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Log watcher ───────────────────────────────────────────────────────────
   restartLogWatcher: () => ipcRenderer.send('log-watcher:restart'),
+  startWatcher: () => ipcRenderer.invoke('control:start-watcher'),
+  stopWatcher: () => ipcRenderer.invoke('control:stop-watcher'),
+  getWatcherStatus: () => ipcRenderer.invoke('watcher:status'),
+
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  getStats: () => ipcRenderer.invoke('stats:get'),
 
   // ── 17Lands data ─────────────────────────────────────────────────────────
   fetchSetData: (setCode, format) =>
@@ -26,6 +32,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Scryfall ─────────────────────────────────────────────────────────────
   resolveArenaIds: (grpIds) => ipcRenderer.invoke('scryfall:resolve-ids', grpIds),
+
+  // ── App info ─────────────────────────────────────────────────────────────
+  appVersion: ipcRenderer.sendSync ? undefined : undefined, // resolved via IPC
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+
+  // ── Draft recommendation ─────────────────────────────────────────────────
+  getRecommendation: () => ipcRenderer.invoke('draft:get-recommendation'),
 
   // ── Shell ─────────────────────────────────────────────────────────────────
   openUrl: (url) => ipcRenderer.send('shell:open-url', url),
@@ -85,5 +98,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const h = (_e, ts) => cb(ts);
     ipcRenderer.on('log-updated', h);
     return () => ipcRenderer.removeListener('log-updated', h);
+  },
+  onUpdateAvailable: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on('update-available', h);
+    return () => ipcRenderer.removeListener('update-available', h);
+  },
+  onParseWarning: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('control:parse-warning', h);
+    return () => ipcRenderer.removeListener('control:parse-warning', h);
   },
 });

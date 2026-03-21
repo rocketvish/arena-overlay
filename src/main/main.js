@@ -4,11 +4,27 @@ const settings = require('./settings');
 const tray = require('./tray');
 const logWatcher = require('./logWatcher');
 const landsData = require('./17landsData');
+const appLogger = require('./appLogger');
+const controlWindowModule = require('./controlWindow');
 
 const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
 
 let overlayWindow = null;
 let isInteractable = false;
+
+// ─── Broadcast helper ────────────────────────────────────────────────────────
+
+function broadcastToAll(channel, data) {
+  const windows = [
+    overlayWindow,
+    controlWindowModule.getControlWindow(),
+  ];
+  for (const win of windows) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, data);
+    }
+  }
+}
 
 // ─── Window Creation ────────────────────────────────────────────────────────
 
@@ -47,7 +63,6 @@ function createOverlayWindow() {
 
   if (isDev) {
     overlayWindow.loadURL('http://localhost:5173');
-    // overlayWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     overlayWindow.loadFile(
       path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html')
@@ -55,6 +70,7 @@ function createOverlayWindow() {
   }
 
   overlayWindow.once('ready-to-show', () => {
+    // Overlay is hidden by default — shows automatically when draft starts
     if (overlay.visible) overlayWindow.show();
   });
 
@@ -106,16 +122,34 @@ function registerIPC() {
   });
 
   // ── Log watcher ───────────────────────────────────────────────────────────
-  ipcMain.on('log-watcher:restart', () => logWatcher.startWatching(overlayWindow));
+  ipcMain.on('log-watcher:restart', () => logWatcher.startWatching(broadcastToAll));
+
+  // ── Log watcher start/stop (from control window) ──────────────────────────
+  ipcMain.handle('control:start-watcher', () => {
+    logWatcher.startWatching(broadcastToAll);
+    return { running: true };
+  });
+
+  ipcMain.handle('control:stop-watcher', () => {
+    logWatcher.stopWatching();
+    return { running: false };
+  });
+
+  ipcMain.handle('watcher:status', () => {
+    return { running: logWatcher.isRunning() };
+  });
+
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  ipcMain.handle('stats:get', () => logWatcher.getStats());
 
   // ── 17Lands data ──────────────────────────────────────────────────────────
   ipcMain.handle('17lands:fetch-set', async (_event, setCode, format) => {
-    const result = await landsData.fetchSetData(setCode, format, overlayWindow);
+    const result = await landsData.fetchSetData(setCode, format, { send: broadcastToAll });
     return result;
   });
 
   ipcMain.handle('17lands:fetch-color-pair', async (_event, setCode, format, colorPair) => {
-    const result = await landsData.fetchColorPairData(setCode, format, colorPair, overlayWindow);
+    const result = await landsData.fetchColorPairData(setCode, format, colorPair, { send: broadcastToAll });
     return result;
   });
 
@@ -129,9 +163,11 @@ function registerIPC() {
     return landsData.resolveArenaIds(grpIds);
   });
 
+  // ── App version ───────────────────────────────────────────────────────────
+  ipcMain.handle('app:get-version', () => app.getVersion());
+
   // ── Open external URL ─────────────────────────────────────────────────────
   ipcMain.on('shell:open-url', (_event, url) => {
-    // Validate it's a known safe domain before opening
     try {
       const parsed = new URL(url);
       const allowed = ['www.17lands.com', '17lands.com', 'scryfall.com', 'www.scryfall.com'];
@@ -142,6 +178,12 @@ function registerIPC() {
       console.warn('[main] Invalid URL rejected:', url);
     }
   });
+
+  // ── Recommendation ────────────────────────────────────────────────────────
+  ipcMain.handle('draft:get-recommendation', async () => {
+    // Recommendation is computed in pack-opened handler and cached
+    return null; // Handled via broadcast
+  });
 }
 
 // ─── Global Shortcuts ───────────────────────────────────────────────────────
@@ -151,6 +193,7 @@ function registerShortcuts() {
   const { hotkey_toggle, hotkey_interact } = s.general;
 
   const tryRegister = (key, fn) => {
+    if (!key) return;
     try {
       globalShortcut.register(key, fn);
     } catch {
@@ -166,28 +209,64 @@ function registerShortcuts() {
   tryRegister(hotkey_interact, () => setClickThrough(isInteractable));
 }
 
+// ─── Auto updater ────────────────────────────────────────────────────────────
+
+function setupAutoUpdater() {
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.checkForUpdatesAndNotify();
+    autoUpdater.on('update-available', () => {
+      broadcastToAll('update-available', {});
+    });
+    autoUpdater.on('error', (err) => {
+      appLogger.log('autoUpdater', 'warn', 'Update check error', err.message);
+    });
+  } catch {
+    // electron-updater not available in dev
+    appLogger.log('main', 'info', 'electron-updater not available (dev mode)');
+  }
+}
+
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  appLogger.init();
+  appLogger.log('main', 'info', 'App starting', { isDev, version: app.getVersion() });
+
   createOverlayWindow();
+  const controlWindow = controlWindowModule.createControlWindow();
   registerIPC();
   registerShortcuts();
-  tray.create(overlayWindow);
+  tray.create(overlayWindow, controlWindow);
 
+  // Start log watcher once overlay is loaded
   overlayWindow.webContents.once('did-finish-load', () => {
-    logWatcher.startWatching(overlayWindow);
+    logWatcher.startWatching(broadcastToAll);
   });
+
+  // Auto-show overlay when draft starts (if setting enabled)
+  // Auto-hide when draft ends
+  // These are handled by the log watcher broadcasting draft-started/draft-ended
 
   app.on('activate', () => {
     if (!overlayWindow) createOverlayWindow();
   });
+
+  // Setup auto-updater in packaged mode
+  if (app.isPackaged) {
+    setupAutoUpdater();
+  }
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   logWatcher.stopWatching();
   tray.destroy();
+  appLogger.log('main', 'info', 'App shutting down');
 });
 
-// Keep running in tray when window is closed
+// Keep running in tray when all windows are closed
 app.on('window-all-closed', () => {});
+
+// Expose broadcastToAll for use by logWatcher/logParser
+module.exports = { broadcastToAll };

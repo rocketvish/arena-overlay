@@ -21,6 +21,7 @@ const INITIAL_STATE = {
   pickedCards: [],   // accumulated picks with stats
   landsStatus: null, // 'fetching' | 'loaded' | 'error'
   landsError: null,
+  recommendation: null, // { primary, secondary, explanation, colors }
 };
 
 export function useDraftState(settings) {
@@ -159,6 +160,7 @@ export function useDraftState(settings) {
           pickNumber,
           currentPack: cards,
           enrichedPack: enriched,
+          recommendation: null, // Will be set after enrichment if data available
         }));
       }),
 

@@ -87,14 +87,42 @@ function IdleView({ landsStatus }) {
   );
 }
 
+// ── Recommendation bar ────────────────────────────────────────────────────────
+function RecommendationBar({ recommendation }) {
+  if (!recommendation?.primary) return null;
+  const card = recommendation.primary;
+  const grade = card.stats?.grade;
+  return (
+    <div style={{
+      padding: '4px 8px',
+      background: 'rgba(80,200,120,0.08)',
+      borderBottom: '1px solid rgba(80,200,120,0.15)',
+      display: 'flex', alignItems: 'center', gap: 6,
+      flexShrink: 0,
+    }}>
+      <span style={{ fontSize: 10, color: '#7ec8a0' }}>★</span>
+      <span style={{ fontSize: 11, color: '#7ec8a0', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {card.name ?? `#${card.grpId}`}
+        {grade && <span style={{ marginLeft: 5, opacity: 0.8 }}>({grade})</span>}
+      </span>
+      {recommendation.explanation && (
+        <span style={{ fontSize: 9, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
+          {recommendation.explanation}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
-export default function DraftOverlay({ draftState, settings, onColorFilterChange }) {
+export default function DraftOverlay({ draftState, settings, onColorFilterChange, recommendation }) {
   if (!settings) return null;
 
   const { columns = {}, display = {} } = settings;
   const compact = display.compactMode ?? false;
   const sortBy = display.sortBy ?? 'grade';
   const colorFilter = display.colorFilter ?? 'all';
+  const showRecommendation = display.showRecommendation ?? true;
 
   const { inDraft, enrichedPack, pickedCards, setCode, landsStatus, landsError } = draftState;
 
@@ -103,12 +131,17 @@ export default function DraftOverlay({ draftState, settings, onColorFilterChange
     [enrichedPack, sortBy]
   );
 
+  const recommendedGrpId = recommendation?.primary?.grpId ?? null;
+
   if (!inDraft) return <IdleView landsStatus={landsStatus} />;
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Loading / error banner */}
       <LoadingBanner landsStatus={landsStatus} landsError={landsError} />
+
+      {/* Recommendation bar */}
+      {showRecommendation && recommendation && <RecommendationBar recommendation={recommendation} />}
 
       {/* Color filter chips */}
       <ColorFilter value={colorFilter} onChange={onColorFilterChange} />
@@ -130,6 +163,7 @@ export default function DraftOverlay({ draftState, settings, onColorFilterChange
               columns={columns}
               compact={compact}
               isTopPick={i === 0}
+              isRecommended={recommendedGrpId != null && card.grpId === recommendedGrpId}
             />
           ))
         )}

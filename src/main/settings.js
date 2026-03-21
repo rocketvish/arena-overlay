@@ -10,15 +10,35 @@ function getSettingsFile() {
 }
 
 const DEFAULT_SETTINGS = {
+  general: {
+    arenaLogPath: '%APPDATA%/../LocalLow/Wizards Of The Coast/MTGA/Player.log',
+    hotkey_toggle: 'Alt+H',
+    hotkey_interact: 'Alt+D',
+    draftFormat: 'PremierDraft',
+    runOnStartup: false,
+    minimizeToTray: true,
+    // Legacy compat
+    autoLaunch: false,
+  },
   overlay: {
+    autoShowOnDraft: true,
+    autoHideOnDraftEnd: true,
     x: -1,
-    y: 0,
+    y: 50,
     width: 340,
-    height: 900,
+    height: 700,
     opacity: 0.85,
-    locked: false,
+    fontSize: 'medium',
     visible: true,
+    // Legacy compat
+    locked: false,
     minimized: false,
+  },
+  display: {
+    sortBy: 'grade',
+    colorFilter: 'all',
+    compactMode: false,
+    showRecommendation: true,
   },
   columns: {
     grade: true,
@@ -27,19 +47,6 @@ const DEFAULT_SETTINGS = {
     gpwr: false,
     alsa: false,
     iwd: false,
-  },
-  display: {
-    sortBy: 'grade',
-    colorFilter: 'all',
-    compactMode: false,
-    fontSize: 'medium',
-  },
-  general: {
-    arenaLogPath: '%APPDATA%/../LocalLow/Wizards Of The Coast/MTGA/Player.log',
-    autoLaunch: false,
-    hotkey_toggle: 'Alt+H',
-    hotkey_interact: 'Alt+D',
-    draftFormat: 'PremierDraft',
   },
 };
 

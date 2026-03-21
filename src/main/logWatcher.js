@@ -2,12 +2,60 @@ const fs = require('fs');
 const chokidar = require('chokidar');
 const settings = require('./settings');
 const logParser = require('./logParser');
+const appLogger = require('./appLogger');
 
 let watcher = null;
 let pollTimer = null;
+let staleCheckTimer = null;
 let lastSize = 0;
 let logPath = '';
-let overlayWin = null;
+let broadcastFn = null; // function(channel, data) — sends to all windows
+let running = false;
+
+// ── Health metrics ────────────────────────────────────────────────────────────
+
+let stats = {
+  linesParsed: 0,
+  eventsDetected: 0,
+  parseFailures: 0,
+};
+
+// ── Activity tracking for stale detection ─────────────────────────────────────
+
+let lastActivityTime = Date.now();
+let lastStaleWarned = false;
+
+// ── Burst buffering ───────────────────────────────────────────────────────────
+
+let lineBuffer = [];
+let flushTimer = null;
+
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    const lines = lineBuffer.splice(0);
+    processLines(lines);
+  }, 200);
+}
+
+function processLines(lines) {
+  if (!broadcastFn) return;
+  for (const line of lines) {
+    if (line.trim()) {
+      stats.linesParsed++;
+      logParser.parseLine(line, broadcastFn);
+    }
+  }
+  // Check parse failure ratio
+  if (stats.linesParsed > 100 && stats.parseFailures / stats.linesParsed > 0.1) {
+    broadcastFn('control:parse-warning', {
+      ratio: stats.parseFailures / stats.linesParsed,
+      failures: stats.parseFailures,
+      total: stats.linesParsed,
+    });
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -17,23 +65,14 @@ function resolvedLogPath() {
 }
 
 function emitStatus(status) {
-  if (overlayWin && !overlayWin.isDestroyed()) {
-    overlayWin.webContents.send('status-update', status);
-  }
+  if (broadcastFn) broadcastFn('status-update', status);
 }
 
 function emitLogUpdated() {
-  if (overlayWin && !overlayWin.isDestroyed()) {
-    overlayWin.webContents.send('log-updated', Date.now());
-  }
+  if (broadcastFn) broadcastFn('log-updated', Date.now());
 }
 
 // ─── Scan the file for the LATEST draft event ─────────────────────────────────
-//
-// Arena appends new events to the log, so older drafts appear earlier in the
-// file. On startup we scan backwards to find the last draft-related block and
-// feed only that (plus any subsequent lines) to the parser, ignoring all the
-// stale history before it.
 
 const DRAFT_MARKERS = [
   'BotDraftDraftStatus',
@@ -55,6 +94,7 @@ function initialScan(filePath) {
     content = fs.readFileSync(filePath, 'utf-8');
     stat = fs.statSync(filePath);
   } catch (err) {
+    appLogger.log('logWatcher', 'error', 'Cannot read log for initial scan', err.message);
     console.error('[logWatcher] Cannot read log for initial scan:', err.message);
     return;
   }
@@ -71,7 +111,6 @@ function initialScan(filePath) {
     }
   }
 
-  // Use actual file size (bytes) — not content.length (chars) — as the byte offset
   lastSize = stat.size;
 
   if (latestDraftLine === -1) {
@@ -79,14 +118,18 @@ function initialScan(filePath) {
     return;
   }
 
-  // Go back a few extra lines to capture the request line before the response
   const startLine = Math.max(0, latestDraftLine - 3);
   console.log(`[logWatcher] Latest draft event near line ${latestDraftLine}, parsing from line ${startLine}`);
 
   logParser.reset();
-  for (let i = startLine; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim()) logParser.parseLine(line, overlayWin);
+  if (broadcastFn) {
+    for (let i = startLine; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim()) {
+        stats.linesParsed++;
+        logParser.parseLine(line, broadcastFn);
+      }
+    }
   }
 }
 
@@ -102,11 +145,15 @@ function readNewContent(filePath) {
       console.log('[logWatcher] Log file truncated — Arena restarted');
       lastSize = 0;
       logParser.reset();
+      stats = { linesParsed: 0, eventsDetected: 0, parseFailures: 0 };
       initialScan(filePath);
       return;
     }
 
     if (currentSize === lastSize) return;
+
+    lastActivityTime = Date.now();
+    lastStaleWarned = false;
 
     const fd = fs.openSync(filePath, 'r');
     const bufLen = currentSize - lastSize;
@@ -115,29 +162,71 @@ function readNewContent(filePath) {
     fs.closeSync(fd);
     lastSize = currentSize;
 
-    console.log(`[logWatcher] Read ${bufLen} new bytes`);
+    appLogger.log('logWatcher', 'debug', `Read ${bufLen} new bytes`);
     emitLogUpdated();
 
     const newContent = buf.toString('utf-8');
-    for (const line of newContent.split('\n')) {
-      if (line.trim()) logParser.parseLine(line, overlayWin);
-    }
+    const newLines = newContent.split('\n');
+
+    // Use burst buffer for rapid writes
+    lineBuffer.push(...newLines);
+    scheduleFlush();
   } catch (err) {
+    appLogger.log('logWatcher', 'error', 'Error reading log', err.message);
     console.error('[logWatcher] Error reading log:', err.message);
   }
 }
 
+// ─── Stale detection ──────────────────────────────────────────────────────────
+
+function setupStaleDetection() {
+  if (staleCheckTimer) clearInterval(staleCheckTimer);
+
+  staleCheckTimer = setInterval(() => {
+    const elapsed = Date.now() - lastActivityTime;
+    const parserState = logParser.getState();
+    const inDraft = parserState?.inDraft ?? false;
+
+    if (inDraft && elapsed > 30000) {
+      // In draft but no activity for 30s — force re-read last portion
+      if (fs.existsSync(logPath)) {
+        const stat = fs.statSync(logPath);
+        const rereadSize = Math.max(0, stat.size - 10000);
+        if (rereadSize < lastSize) {
+          console.log('[logWatcher] Stale detection: forcing re-read');
+          lastSize = rereadSize;
+          readNewContent(logPath);
+        }
+      }
+    }
+
+    if (elapsed > 60000 && !lastStaleWarned) {
+      lastStaleWarned = true;
+      emitStatus('log-stale');
+      appLogger.log('logWatcher', 'warn', 'Log appears stale — no activity for 60s');
+    }
+  }, 5000);
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-function startWatching(win) {
-  overlayWin = win;
+function startWatching(broadcast) {
+  broadcastFn = broadcast;
+  // Also update parser's broadcast function
+  logParser.setBroadcast(broadcast);
+
   stopWatching();
+  running = true;
 
   logPath = resolvedLogPath();
   lastSize = 0;
+  lastActivityTime = Date.now();
+  lastStaleWarned = false;
+  stats = { linesParsed: 0, eventsDetected: 0, parseFailures: 0 };
   logParser.reset();
 
   console.log('[logWatcher] Watching:', logPath);
+  appLogger.log('logWatcher', 'info', 'Starting log watcher', { logPath });
   emitStatus('watching');
 
   if (!fs.existsSync(logPath)) {
@@ -161,25 +250,28 @@ function startWatching(win) {
   });
 
   watcher.on('change', () => {
-    console.log('[logWatcher] chokidar change event');
     readNewContent(logPath);
   });
 
   watcher.on('error', (err) => {
+    appLogger.log('logWatcher', 'error', 'Watcher error', err.message);
     console.error('[logWatcher] Watcher error:', err.message);
     emitStatus('error');
   });
 
   // ── Polling fallback — catches writes that chokidar misses on Windows ────
-  // Runs every 500 ms and calls readNewContent if the file has grown.
   pollTimer = setInterval(() => {
     if (fs.existsSync(logPath)) {
       readNewContent(logPath);
     }
   }, 500);
+
+  // ── Stale detection ──────────────────────────────────────────────────────
+  setupStaleDetection();
 }
 
 function stopWatching() {
+  running = false;
   if (watcher) {
     watcher.close();
     watcher = null;
@@ -188,6 +280,34 @@ function stopWatching() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (staleCheckTimer) {
+    clearInterval(staleCheckTimer);
+    staleCheckTimer = null;
+  }
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
 }
 
-module.exports = { startWatching, stopWatching };
+function isRunning() {
+  return running;
+}
+
+function getStats() {
+  return { ...stats, running };
+}
+
+// Expose method for logParser to increment event count
+function incrementEventCount() {
+  stats.eventsDetected++;
+}
+
+function incrementFailureCount() {
+  stats.parseFailures++;
+}
+
+module.exports = {
+  startWatching, stopWatching, isRunning, getStats,
+  incrementEventCount, incrementFailureCount,
+};
