@@ -36,8 +36,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resolveArenaIds: (grpIds) => ipcRenderer.invoke('scryfall:resolve-ids', grpIds),
 
   // ── App info ─────────────────────────────────────────────────────────────
-  appVersion: ipcRenderer.sendSync ? undefined : undefined, // resolved via IPC
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+
+  // ── Auto-updater ──────────────────────────────────────────────────────────
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  quitAndInstall: () => ipcRenderer.send('updater:quit-and-install'),
 
   // ── Draft recommendation ─────────────────────────────────────────────────
   getRecommendation: () => ipcRenderer.invoke('draft:get-recommendation'),
@@ -112,9 +115,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('overlay-visibility-changed', h);
   },
   onUpdateAvailable: (cb) => {
-    const h = () => cb();
+    const h = (_e, d) => cb(d);
     ipcRenderer.on('update-available', h);
     return () => ipcRenderer.removeListener('update-available', h);
+  },
+  onUpdateDownloaded: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('update-downloaded', h);
+    return () => ipcRenderer.removeListener('update-downloaded', h);
   },
   onParseWarning: (cb) => {
     const h = (_e, d) => cb(d);

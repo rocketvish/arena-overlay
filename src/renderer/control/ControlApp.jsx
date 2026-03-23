@@ -18,20 +18,22 @@ export default function ControlApp() {
   const [status, setStatus] = useState('watching');
   const [watcherRunning, setWatcherRunning] = useState(true);
   const [overlayVisible, setOverlayVisible] = useState(true);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);  // { version, downloaded }
+  const [version, setVersion] = useState('0.3.0');
 
   useEffect(() => {
     if (!window.electronAPI) return;
+
+    window.electronAPI.getAppVersion?.().then((v) => { if (v) setVersion(v); });
+    window.electronAPI.getWatcherStatus?.().then((s) => { if (s) setWatcherRunning(s.running); });
+    window.electronAPI.getOverlayVisible?.().then((v) => setOverlayVisible(v));
+
     const unsubs = [
       window.electronAPI.onStatusUpdate(setStatus),
-      window.electronAPI.onUpdateAvailable?.(() => setUpdateAvailable(true)),
+      window.electronAPI.onUpdateAvailable?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: false }))),
+      window.electronAPI.onUpdateDownloaded?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: true }))),
       window.electronAPI.onOverlayVisibilityChanged?.((v) => setOverlayVisible(v)),
     ].filter(Boolean);
-
-    window.electronAPI.getWatcherStatus?.().then((s) => {
-      if (s) setWatcherRunning(s.running);
-    });
-    window.electronAPI.getOverlayVisible?.().then((v) => setOverlayVisible(v));
 
     return () => unsubs.forEach((fn) => fn());
   }, []);
@@ -53,8 +55,6 @@ export default function ControlApp() {
     }
   }, [watcherRunning]);
 
-  const version = window.electronAPI?.appVersion ?? '0.3.0';
-
   if (settingsLoading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#444' }}>
@@ -67,9 +67,21 @@ export default function ControlApp() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d0d1a', color: '#e0e0e0' }}>
       <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} />
 
-      {updateAvailable && (
-        <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.2)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0' }}>
-          Update available! Restart the app to install.
+      {updateInfo && (
+        <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.18)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1 }}>
+            {updateInfo.downloaded
+              ? `v${updateInfo.version} ready — restart to install`
+              : `v${updateInfo.version} available — downloading…`}
+          </span>
+          {updateInfo.downloaded && (
+            <button
+              onClick={() => window.electronAPI?.quitAndInstall?.()}
+              style={{ padding: '2px 10px', fontSize: 11, background: 'rgba(80,200,120,0.25)', border: '1px solid rgba(80,200,120,0.5)', borderRadius: 3, color: '#7ec8a0', cursor: 'pointer' }}
+            >
+              Restart &amp; Install
+            </button>
+          )}
         </div>
       )}
 

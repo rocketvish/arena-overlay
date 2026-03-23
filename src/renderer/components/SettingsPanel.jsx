@@ -174,6 +174,7 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
       <Section title="Actions">
         <ActionBtn label="Restart Log Watcher" onClick={() => window.electronAPI?.restartLogWatcher()} />
         <ActionBtn label="Clear 17Lands cache and re-fetch" onClick={handleClearCache} />
+        <ActionBtn label="Check for Updates" onClick={() => window.electronAPI?.checkForUpdates?.()} />
         <ActionBtn label="Reset all settings to defaults" onClick={handleReset} danger />
       </Section>
     </div>

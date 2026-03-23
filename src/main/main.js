@@ -223,20 +223,54 @@ function registerShortcuts() {
 
 // ─── Auto updater ────────────────────────────────────────────────────────────
 
+let autoUpdaterInstance = null;
+let updateDownloaded = false;
+
 function setupAutoUpdater() {
   try {
     const { autoUpdater } = require('electron-updater');
-    autoUpdater.checkForUpdatesAndNotify();
-    autoUpdater.on('update-available', () => {
-      broadcastToAll('update-available', {});
+    autoUpdaterInstance = autoUpdater;
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on('update-available', (info) => {
+      appLogger.log('autoUpdater', 'info', 'Update available', info.version);
+      broadcastToAll('update-available', { version: info.version });
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      updateDownloaded = true;
+      appLogger.log('autoUpdater', 'info', 'Update downloaded', info.version);
+      broadcastToAll('update-downloaded', { version: info.version });
     });
     autoUpdater.on('error', (err) => {
       appLogger.log('autoUpdater', 'warn', 'Update check error', err.message);
+      broadcastToAll('update-error', { message: err.message });
+    });
+
+    autoUpdater.checkForUpdates().catch((err) => {
+      appLogger.log('autoUpdater', 'warn', 'checkForUpdates failed', err.message);
     });
   } catch {
-    // electron-updater not available in dev
     appLogger.log('main', 'info', 'electron-updater not available (dev mode)');
   }
+}
+
+function registerUpdateIPC() {
+  ipcMain.handle('updater:check', async () => {
+    if (!autoUpdaterInstance) return { error: 'Updater not available' };
+    try {
+      await autoUpdaterInstance.checkForUpdates();
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.on('updater:quit-and-install', () => {
+    if (autoUpdaterInstance && updateDownloaded) {
+      autoUpdaterInstance.quitAndInstall();
+    }
+  });
 }
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
@@ -248,6 +282,7 @@ app.whenReady().then(() => {
   createOverlayWindow();
   const controlWindow = controlWindowModule.createControlWindow();
   registerIPC();
+  registerUpdateIPC();
   registerShortcuts();
   tray.create(overlayWindow, controlWindow);
 
