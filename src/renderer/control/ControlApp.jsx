@@ -19,7 +19,7 @@ export default function ControlApp() {
   const [watcherRunning, setWatcherRunning] = useState(true);
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [updateInfo, setUpdateInfo] = useState(null);  // { version, downloaded }
-  const [version, setVersion] = useState('0.3.0');
+  const [version, setVersion] = useState('0.3.1');
 
   useEffect(() => {
     if (!window.electronAPI) return;

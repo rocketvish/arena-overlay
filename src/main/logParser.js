@@ -367,9 +367,27 @@ function handleDraftPayload(payload) {
     return null;
   }).filter(c => c && !isNaN(c.grpId));
 
+  // Validation: log a warning when the pack size seems wrong.
+  // In a normal 3-pack draft the remaining cards = 15 - pickNumber.
+  // This fires when the parser might be processing stale or merged data.
+  if (packNumber != null && pickNumber != null) {
+    const expected = 15 - pickNumber;
+    if (normalizedPack.length !== expected) {
+      appLogger.log('parser', 'warn',
+        `Pack size mismatch: got ${normalizedPack.length} card(s), ` +
+        `expected ${expected} (pack=${packNumber}, pick=${pickNumber})`, {
+          cards: normalizedPack.map(c => c.grpId),
+        });
+      console.warn(`[parser] Pack size mismatch: got ${normalizedPack.length}, expected ${expected} ` +
+        `(pack=${packNumber}, pick=${pickNumber}) cards=${JSON.stringify(normalizedPack.map(c => c.grpId))}`);
+    }
+  }
+
   if (setCode) state.setCode = setCode;
   if (packNumber !== undefined && packNumber !== null) state.packNumber = packNumber;
   if (pickNumber !== undefined && pickNumber !== null) state.pickNumber = pickNumber;
+  // Explicitly clear previous pack before setting new one (prevents any stale-merge bugs)
+  state.currentPack = [];
   state.currentPack = normalizedPack;
 
   if (!state.inDraft) {
@@ -379,12 +397,30 @@ function handleDraftPayload(payload) {
     emit('draft-started', { setCode: state.setCode });
   }
 
-  // Deduplicate: Arena periodically re-logs the current draft state, so the
-  // same (packNumber, pickNumber) can appear many times. Only emit when the
-  // pick actually advances.
-  if (state.packNumber === lastEmittedPack.packNumber &&
-      state.pickNumber === lastEmittedPack.pickNumber) {
-    appLogger.log('parser', 'debug', `pack-opened deduped pack=${state.packNumber} pick=${state.pickNumber}`);
+  // Deduplicate / anti-regression: only emit a pack if it is strictly NEWER
+  // than the last emitted pack.  "Newer" means a higher packNumber, or the
+  // same packNumber with a higher pickNumber.
+  //
+  // The simple equality check used previously caused a phantom-card bug:
+  // logWatcher's stale-detection force-re-reads the last 10 kB of the log
+  // every 30 s when idle in a draft.  That re-read replays every old pick
+  // event in the window (picks 0→N-1).  Each has a different pickNumber so
+  // the old equality check let them all through, updating the overlay with
+  // stale pack data and leaving it stuck on an old pack after pick N was
+  // already deduplicated.
+  //
+  // With this check, once we have seen pack P / pick N, any event with a
+  // lower pickNumber (same pack) or lower packNumber is silently discarded.
+  const isNewer =
+    lastEmittedPack.packNumber === null ||
+    state.packNumber > lastEmittedPack.packNumber ||
+    (state.packNumber === lastEmittedPack.packNumber &&
+     state.pickNumber > lastEmittedPack.pickNumber);
+
+  if (!isNewer) {
+    appLogger.log('parser', 'debug',
+      `pack-opened suppressed (stale) pack=${state.packNumber} pick=${state.pickNumber} ` +
+      `lastPack=${lastEmittedPack.packNumber} lastPick=${lastEmittedPack.pickNumber}`);
     return;
   }
   lastEmittedPack = { packNumber: state.packNumber, pickNumber: state.pickNumber };

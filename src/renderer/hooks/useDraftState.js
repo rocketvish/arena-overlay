@@ -165,6 +165,15 @@ export function useDraftState(settings) {
 
         const enriched = enrich(cards, sc, fmt, colorPair);
 
+        // Sanity check: enriched pack must match the raw pack 1-to-1
+        if (enriched.length !== cards.length) {
+          console.warn(
+            `[useDraftState] enrichedPack length mismatch: raw=${cards.length} enriched=${enriched.length}`,
+            'raw:', cards.map(c => c.grpId),
+            'enriched:', enriched.map(c => c.grpId),
+          );
+        }
+
         setDraftState((prev) => ({
           ...prev,
           inDraft: true,

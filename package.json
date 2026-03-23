@@ -1,13 +1,14 @@
 {
   "name": "arena-overlay",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MTG Arena draft overlay with 17Lands stats",
+  "author": "Rocketfish",
   "main": "src/main/main.js",
   "scripts": {
     "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"vite\" \"wait-on tcp:5173 && cross-env ELECTRON_ENV=development node scripts/start-electron.js\"",
     "build": "vite build",
-    "package": "npm run build && electron-builder --win",
-    "release": "npm run build && electron-builder --win --publish=always",
+    "package": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
+    "release": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish=always",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -31,7 +32,9 @@
     "copyright": "Copyright 2026 Rocketfish",
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "signingHashAlgorithms": null,
+      "forceCodeSigning": false
     },
     "nsis": {
       "oneClick": false,
