@@ -36,7 +36,35 @@ const SET_NAMES = {
   TMT: 'Teenage Mutant Ninja Turtles',
 };
 
-export default function StatusBar({ status, draftState, watcherRunning }) {
+function OverlayLockChip({ isInteractable }) {
+  const color = isInteractable ? '#5cc8ff' : '#7a7a7a';
+  const bg = isInteractable ? 'rgba(92,200,255,0.18)' : 'rgba(255,255,255,0.04)';
+  const border = isInteractable ? 'rgba(92,200,255,0.55)' : 'rgba(255,255,255,0.12)';
+  const label = isInteractable ? 'OVERLAY: UNLOCKED' : 'OVERLAY: LOCKED';
+  return (
+    <span title={isInteractable
+      ? 'Overlay is interactive — click to drag/resize'
+      : 'Overlay is click-through (locked). Press Alt+D in the overlay to unlock.'}
+      style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '2px 8px', borderRadius: 4,
+      background: bg, border: `1px solid ${border}`,
+      fontSize: 10, fontWeight: 700, color, letterSpacing: '0.04em',
+      flexShrink: 0,
+    }}>
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+        {isInteractable ? (
+          <path d="M7 11V7a5 5 0 019.9-1M4 11h16v10H4z" stroke={color} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+        ) : (
+          <path d="M7 11V7a5 5 0 0110 0v4M4 11h16v10H4z" stroke={color} strokeWidth="2.5" fill="none" strokeLinecap="round" />
+        )}
+      </svg>
+      {label}
+    </span>
+  );
+}
+
+export default function StatusBar({ status, draftState, watcherRunning, isInteractable }) {
   const { inDraft, setCode, packNumber, pickNumber, format } = draftState;
   const statusLabel = STATUS_LABELS[status] ?? status ?? 'Watching...';
   const statusColor = STATUS_COLORS[status] ?? '#888';
@@ -65,6 +93,9 @@ export default function StatusBar({ status, draftState, watcherRunning }) {
           ? `Draft active: ${setName} — ${formatName}`
           : statusLabel}
       </span>
+
+      {/* Overlay lock state — visible regardless of draft state */}
+      <OverlayLockChip isInteractable={!!isInteractable} />
 
       {/* Pack/pick info when in draft */}
       {inDraft && (

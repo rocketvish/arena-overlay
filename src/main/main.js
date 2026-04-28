@@ -6,6 +6,8 @@ const logWatcher = require('./logWatcher');
 const landsData = require('./17landsData');
 const appLogger = require('./appLogger');
 const controlWindowModule = require('./controlWindow');
+const assistantManager = require('./assistantManager');
+const testReplay       = require('./testReplay');
 
 const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
 
@@ -14,7 +16,7 @@ let isInteractable = false;
 
 // ─── Broadcast helper ────────────────────────────────────────────────────────
 
-function broadcastToAll(channel, data) {
+function sendToWindows(channel, data) {
   const windows = [
     overlayWindow,
     controlWindowModule.getControlWindow(),
@@ -24,6 +26,15 @@ function broadcastToAll(channel, data) {
       win.webContents.send(channel, data);
     }
   }
+}
+
+function broadcastToAll(channel, data) {
+  // Forward to renderer windows
+  sendToWindows(channel, data);
+  // Also handle in main process for assistant analysis
+  assistantManager.handleEvent(channel, data).catch((e) => {
+    console.error('[assistant] handleEvent error:', e.message);
+  });
 }
 
 // ─── Window Creation ────────────────────────────────────────────────────────
@@ -85,7 +96,8 @@ function setClickThrough(clickThrough) {
   if (!overlayWindow) return;
   overlayWindow.setIgnoreMouseEvents(clickThrough, { forward: true });
   isInteractable = !clickThrough;
-  overlayWindow.webContents.send('interactable-changed', isInteractable);
+  // Broadcast to all windows so the control window status bar updates too
+  sendToWindows('interactable-changed', isInteractable);
 }
 
 function saveWindowBounds() {
@@ -196,6 +208,30 @@ function registerIPC() {
     // Recommendation is computed in pack-opened handler and cached
     return null; // Handled via broadcast
   });
+
+  // ── Assistant ─────────────────────────────────────────────────────────────
+  ipcMain.handle('assistant:get-state', () => {
+    return assistantManager.getState();
+  });
+
+  // ── Test replay ───────────────────────────────────────────────────────────
+  ipcMain.handle('test:start-replay', async (_event, opts) => {
+    // Pause the live log watcher so it doesn't interfere with replay events
+    logWatcher.stopWatching();
+    const result = await testReplay.startReplay(broadcastToAll, opts ?? {});
+    return result;
+  });
+
+  ipcMain.handle('test:stop-replay', () => {
+    const result = testReplay.stopReplay();
+    // Restart the live watcher after stopping replay
+    logWatcher.startWatching(broadcastToAll);
+    return result;
+  });
+
+  ipcMain.handle('test:is-active', () => {
+    return { active: testReplay.isActive() };
+  });
 }
 
 // ─── Global Shortcuts ───────────────────────────────────────────────────────
@@ -280,6 +316,7 @@ app.whenReady().then(() => {
   appLogger.log('main', 'info', 'App starting', { isDev, version: app.getVersion() });
 
   createOverlayWindow();
+  assistantManager.init(sendToWindows);
   const controlWindow = controlWindowModule.createControlWindow();
   registerIPC();
   registerUpdateIPC();
@@ -316,4 +353,4 @@ app.on('will-quit', () => {
 app.on('window-all-closed', () => {});
 
 // Expose broadcastToAll for use by logWatcher/logParser
-module.exports = { broadcastToAll };
+module.exports = { broadcastToAll, sendToWindows };

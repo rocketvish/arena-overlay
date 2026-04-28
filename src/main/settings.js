@@ -40,6 +40,13 @@ const DEFAULT_SETTINGS = {
     compactMode: false,
     showRecommendation: true,
   },
+  assistant: {
+    enabled: true,
+    showSignalsInOverlay: true,
+    showRecommendationInOverlay: true,
+    confidenceThreshold: 4,
+    draftStyle: 'balanced',
+  },
   columns: {
     grade: true,
     gihwr: true,

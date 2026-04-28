@@ -29,34 +29,41 @@ function ColorPip({ color }) {
 }
 
 // ── Grade badge ───────────────────────────────────────────────────────────────
+// Saturated colors for high-impact visual scanning at a glance.
 const GRADE_BADGE = {
-  'A+': { bg: 'rgba( 50,200, 80,0.25)', border: 'rgba( 50,200, 80,0.5)', text: '#32c850' },
-  'A':  { bg: 'rgba( 50,200, 80,0.20)', border: 'rgba( 50,200, 80,0.4)', text: '#32c850' },
-  'A-': { bg: 'rgba( 80,210,100,0.18)', border: 'rgba( 80,210,100,0.35)', text: '#50d264' },
-  'B+': { bg: 'rgba( 40,170,220,0.20)', border: 'rgba( 40,170,220,0.4)', text: '#28aadc' },
-  'B':  { bg: 'rgba( 40,170,220,0.15)', border: 'rgba( 40,170,220,0.35)', text: '#28aadc' },
-  'B-': { bg: 'rgba( 60,180,200,0.15)', border: 'rgba( 60,180,200,0.3)', text: '#3cb4c8' },
-  'C+': { bg: 'rgba(220,200, 50,0.18)', border: 'rgba(220,200, 50,0.35)', text: '#dcc832' },
-  'C':  { bg: 'rgba(210,185, 40,0.15)', border: 'rgba(210,185, 40,0.3)', text: '#d2b928' },
-  'C-': { bg: 'rgba(200,165, 30,0.12)', border: 'rgba(200,165, 30,0.25)', text: '#c8a51e' },
-  'D+': { bg: 'rgba(230,130, 60,0.18)', border: 'rgba(230,130, 60,0.35)', text: '#e6823c' },
-  'D':  { bg: 'rgba(220,110, 50,0.15)', border: 'rgba(220,110, 50,0.3)', text: '#dc6e32' },
-  'D-': { bg: 'rgba(210, 90, 40,0.12)', border: 'rgba(210, 90, 40,0.25)', text: '#d25a28' },
-  'F':  { bg: 'rgba(200, 50, 50,0.20)', border: 'rgba(200, 50, 50,0.4)', text: '#c83232' },
+  'A+': { bg: 'rgba( 60,230, 90,0.40)', border: 'rgba( 60,230, 90,0.80)', text: '#7cff8c' },
+  'A':  { bg: 'rgba( 60,230, 90,0.35)', border: 'rgba( 60,230, 90,0.70)', text: '#7cff8c' },
+  'A-': { bg: 'rgba( 90,230,110,0.30)', border: 'rgba( 90,230,110,0.60)', text: '#90ff9c' },
+  'B+': { bg: 'rgba( 50,190,240,0.35)', border: 'rgba( 50,190,240,0.70)', text: '#5cc8ff' },
+  'B':  { bg: 'rgba( 50,190,240,0.28)', border: 'rgba( 50,190,240,0.60)', text: '#5cc8ff' },
+  'B-': { bg: 'rgba( 70,200,220,0.25)', border: 'rgba( 70,200,220,0.55)', text: '#6ad4e0' },
+  'C+': { bg: 'rgba(240,215, 60,0.32)', border: 'rgba(240,215, 60,0.65)', text: '#ffd844' },
+  'C':  { bg: 'rgba(230,200, 50,0.28)', border: 'rgba(230,200, 50,0.55)', text: '#f0c838' },
+  'C-': { bg: 'rgba(220,180, 40,0.22)', border: 'rgba(220,180, 40,0.45)', text: '#e0b428' },
+  'D+': { bg: 'rgba(245,140, 70,0.32)', border: 'rgba(245,140, 70,0.65)', text: '#ff944c' },
+  'D':  { bg: 'rgba(235,120, 60,0.28)', border: 'rgba(235,120, 60,0.55)', text: '#ee7c40' },
+  'D-': { bg: 'rgba(225,100, 50,0.22)', border: 'rgba(225,100, 50,0.45)', text: '#dc6432' },
+  'F':  { bg: 'rgba(220, 60, 60,0.36)', border: 'rgba(220, 60, 60,0.75)', text: '#ff5c5c' },
 };
-const GRADE_UNKNOWN = { bg: 'rgba(100,100,100,0.15)', border: 'rgba(100,100,100,0.3)', text: '#666' };
+const GRADE_UNKNOWN = { bg: 'rgba(100,100,100,0.15)', border: 'rgba(100,100,100,0.3)', text: '#888' };
 
-function GradeBadge({ grade }) {
+// grade=string → show badge; grade=null hasData=true → "N/A" (found but no data yet);
+// grade=null hasData=false → "?" (not found in 17Lands at all)
+function GradeBadge({ grade, hasLandsData }) {
   const s = GRADE_BADGE[grade] ?? GRADE_UNKNOWN;
+  const label = grade ?? (hasLandsData ? 'N/A' : '?');
   return (
     <div style={{
-      minWidth: 26, padding: '1px 0',
-      background: s.bg, border: `1px solid ${s.border}`,
-      borderRadius: 3, textAlign: 'center',
-      fontSize: 11, fontWeight: 700, color: s.text,
+      minWidth: 32, padding: '2px 4px',
+      background: s.bg, border: `1.5px solid ${s.border}`,
+      borderRadius: 4, textAlign: 'center',
+      fontSize: grade ? 13 : 10, fontWeight: grade ? 800 : 500,
+      color: grade ? s.text : '#888',
+      letterSpacing: grade ? '-0.02em' : 0,
       flexShrink: 0,
+      textShadow: grade ? '0 1px 2px rgba(0,0,0,0.5)' : 'none',
     }}>
-      {grade ?? '?'}
+      {label}
     </div>
   );
 }
@@ -67,13 +74,15 @@ const RARITY_COLOR = {
 };
 
 // ── Stat cell ─────────────────────────────────────────────────────────────────
-function Stat({ value, show, format, secondary }) {
+function Stat({ value, show, format, secondary, primary }) {
   if (!show) return null;
   const disp = value != null ? (format ? format(value) : String(value)) : '—';
   return (
     <span style={{
-      fontSize: secondary ? 9 : 10, color: secondary ? '#666' : '#aaa',
-      minWidth: 34, textAlign: 'right', fontFamily: 'monospace', flexShrink: 0,
+      fontSize: secondary ? 11 : 12,
+      color: secondary ? '#888' : (primary ? '#fff' : '#cfcfcf'),
+      fontWeight: primary ? 700 : 500,
+      minWidth: 40, textAlign: 'right', fontFamily: 'monospace', flexShrink: 0,
     }}>
       {disp}
     </span>
@@ -86,7 +95,7 @@ function iwd(v) { return v != null ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function CardRow({ card, columns, compact, isTopPick, isRecommended }) {
-  const { name, color, rarity, stats } = card;
+  const { name, color, rarity, stats, hasLandsData } = card;
   const grade = stats?.grade ?? null;
   const lowSample = stats?.lowSample ?? false;
   const rarityColor = RARITY_COLOR[rarity] ?? '#a0a0a0';
@@ -107,9 +116,9 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
     <div
       onContextMenu={handleContextMenu}
       style={{
-        display: 'flex', alignItems: 'center', gap: 5,
-        padding: compact ? '2px 8px' : '4px 8px',
-        borderBottom: '1px solid rgba(255,255,255,0.04)',
+        display: 'flex', alignItems: 'center', gap: 7,
+        padding: compact ? '4px 10px' : '8px 10px',
+        borderBottom: '1px solid rgba(255,255,255,0.05)',
         background: baseBg,
         border: isRecommended ? '1px solid rgba(80,200,120,0.25)' : '1px solid transparent',
         transition: 'background 0.12s',
@@ -121,27 +130,28 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
     >
       {/* Recommended star or color pip */}
       {isRecommended
-        ? <span style={{ fontSize: 8, color: '#7ec8a0', flexShrink: 0, width: 8, textAlign: 'center' }}>★</span>
+        ? <span style={{ fontSize: 10, color: '#7ec8a0', flexShrink: 0, width: 10, textAlign: 'center' }}>★</span>
         : <ColorPip color={color} />
       }
 
       {/* Grade badge */}
-      {columns.grade && <GradeBadge grade={grade} />}
+      {columns.grade && <GradeBadge grade={grade} hasLandsData={hasLandsData} />}
 
       {/* Card name */}
       <span style={{
-        flex: 1, fontSize: compact ? 11 : 12, color: '#e0e0e0',
+        flex: 1, fontSize: compact ? 13 : 14, color: '#ffffff', fontWeight: 500,
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        textShadow: '0 1px 2px rgba(0,0,0,0.6)',
       }}>
         {name ?? `#${card.grpId}`}
-        {lowSample && <span title="Low sample size (<200 games)" style={{ marginLeft: 4, fontSize: 9, color: '#886a30' }}>⚠</span>}
+        {lowSample && <span title="Low sample size (<200 games)" style={{ marginLeft: 4, fontSize: 10, color: '#c8a040' }}>⚠</span>}
       </span>
 
       {/* Rarity dot */}
-      <div style={{ width: 5, height: 5, borderRadius: '50%', background: rarityColor, flexShrink: 0 }} />
+      <div style={{ width: 6, height: 6, borderRadius: '50%', background: rarityColor, flexShrink: 0 }} />
 
-      {/* Stats */}
-      <Stat value={stats?.gihwr} show={columns.gihwr} format={pct} />
+      {/* Stats — GIHWR is the primary scanning column, render bold/white */}
+      <Stat value={stats?.gihwr} show={columns.gihwr} format={pct} primary />
       <Stat value={stats?.ohwr}  show={columns.ohwr}  format={pct}  secondary />
       <Stat value={stats?.gpwr}  show={columns.gpwr}  format={pct} />
       <Stat value={stats?.alsa}  show={columns.alsa}  format={ata} />

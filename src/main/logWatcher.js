@@ -24,8 +24,7 @@ let stats = {
 
 let lastActivityTime = Date.now();
 let lastStaleWarned = false;
-let lastForceReread = 0;       // timestamp of last forced re-read
-let forcedReadInProgress = false; // suppress lastActivityTime update during forced reads
+let lastForceReread = 0; // timestamp of last stale-check forward-read
 
 // ── Burst buffering ───────────────────────────────────────────────────────────
 
@@ -76,19 +75,18 @@ function emitLogUpdated() {
 
 // ─── Scan the file for the LATEST draft event ─────────────────────────────────
 
-const DRAFT_MARKERS = [
+// Markers that appear in DraftStatus *response* headers (<== lines).
+// We deliberately search for pack-bearing responses, not pick requests,
+// so the initial scan always starts at the most recent pack boundary.
+const PACK_RESPONSE_MARKERS = [
   'BotDraftDraftStatus',
   'HumanDraftDraftStatus',
-  'BotDraftDraftPick',
-  'HumanDraftDraftPick',
   'Draft/DraftStatus',
   'Event/DraftNotify',
-  'BotDraftMakePick',
-  'HumanDraftMakePick',
 ];
 
-function isDraftLine(line) {
-  return DRAFT_MARKERS.some(m => line.includes(m));
+function isPackResponseLine(line) {
+  return line.startsWith('<==') && PACK_RESPONSE_MARKERS.some(m => line.includes(m));
 }
 
 function initialScan(filePath) {
@@ -106,24 +104,27 @@ function initialScan(filePath) {
   const lines = content.split('\n');
   console.log(`[logWatcher] Initial scan: ${lines.length} lines, ${stat.size} bytes`);
 
-  // Walk backwards to find the last line that looks like a draft event header
-  let latestDraftLine = -1;
+  // Walk backwards to find the last DraftStatus *response* line (<==).
+  // Searching for responses (not requests) ensures we start at the most recent
+  // pack boundary, not at a MakePick that comes after it.
+  let latestPackLine = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (isDraftLine(lines[i]) && (lines[i].includes('==>') || lines[i].startsWith('<=='))) {
-      latestDraftLine = i;
+    if (isPackResponseLine(lines[i])) {
+      latestPackLine = i;
       break;
     }
   }
 
   lastSize = stat.size;
 
-  if (latestDraftLine === -1) {
-    console.log('[logWatcher] No draft events found in log during initial scan');
+  if (latestPackLine === -1) {
+    console.log('[logWatcher] No draft pack events found in log during initial scan');
     return;
   }
 
-  const startLine = Math.max(0, latestDraftLine - 3);
-  console.log(`[logWatcher] Latest draft event near line ${latestDraftLine}, parsing from line ${startLine}`);
+  // Start 1 line before the response header so the parser has a clean context.
+  const startLine = Math.max(0, latestPackLine - 1);
+  console.log(`[logWatcher] Latest pack response at line ${latestPackLine}, parsing from line ${startLine}`);
 
   logParser.reset();
   if (broadcastFn) {
@@ -156,10 +157,8 @@ function readNewContent(filePath) {
 
     if (currentSize === lastSize) return;
 
-    if (!forcedReadInProgress) {
-      lastActivityTime = Date.now();
-      lastStaleWarned = false;
-    }
+    lastActivityTime = Date.now();
+    lastStaleWarned = false;
 
     const fd = fs.openSync(filePath, 'r');
     const bufLen = currentSize - lastSize;
@@ -190,22 +189,17 @@ function setupStaleDetection() {
 
   staleCheckTimer = setInterval(() => {
     const elapsed = Date.now() - lastActivityTime;
-    const parserState = logParser.getState();
-    const inDraft = parserState?.inDraft ?? false;
 
-    if (inDraft && elapsed > 30000) {
-      // In draft but no activity for 30s — force re-read last portion once per 30s
+    // Forward-only check: call readNewContent (no-op if file hasn't grown).
+    // We do NOT rewind lastSize backwards — replaying already-seen bytes causes
+    // duplicate MakePick events which clear the overlay with ghost data.
+    // The 500ms poll timer already handles missed writes; this is just a
+    // belt-and-suspenders forward-read in case both watchers stalled.
+    if (elapsed > 30000 && fs.existsSync(logPath)) {
       const sinceForcedReread = Date.now() - lastForceReread;
-      if (sinceForcedReread > 30000 && fs.existsSync(logPath)) {
-        const stat = fs.statSync(logPath);
-        const rereadSize = Math.max(0, stat.size - 10000);
-        if (rereadSize < lastSize) {
-          lastForceReread = Date.now();
-          forcedReadInProgress = true;
-          lastSize = rereadSize;
-          readNewContent(logPath);
-          forcedReadInProgress = false;
-        }
+      if (sinceForcedReread > 30000) {
+        lastForceReread = Date.now();
+        readNewContent(logPath); // forward-only; no-op if size unchanged
       }
     }
 

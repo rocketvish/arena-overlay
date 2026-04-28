@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import CardRow from './CardRow';
+import AssistantBar from './AssistantBar';
 
 // ── Arena visual sort ─────────────────────────────────────────────────────────
 // Arena displays pack cards sorted by: rarity (mythic→rare→uncommon→common),
@@ -44,6 +45,12 @@ const BASIC_LAND_NAMES = {
   // TMT (TMNT) set basic land Arena IDs — inferred from gap in 17Lands data
   100648: 'Plains', 100649: 'Island', 100650: 'Swamp',
   100651: 'Mountain', 100652: 'Forest',
+  // FDN (Foundations) basic land Arena IDs — 4 art variants each
+  95181: 'Plains',  95182: 'Plains',  95191: 'Plains',  95192: 'Plains',
+  95183: 'Island',  95184: 'Island',  95193: 'Island',  95194: 'Island',
+  95185: 'Swamp',   95186: 'Swamp',   95195: 'Swamp',   95196: 'Swamp',
+  95187: 'Mountain', 95188: 'Mountain', 95197: 'Mountain', 95198: 'Mountain',
+  95189: 'Forest',  95190: 'Forest',  95199: 'Forest',  95200: 'Forest',
 };
 
 function resolveBasicLandName(card) {
@@ -53,15 +60,15 @@ function resolveBasicLandName(card) {
 
 // ── Column header row ─────────────────────────────────────────────────────────
 function ColHeaders({ columns, compact }) {
-  const s = { fontSize: 9, color: '#555', textAlign: 'right', minWidth: 34, textTransform: 'uppercase', fontFamily: 'monospace', flexShrink: 0 };
+  const s = { fontSize: 10, color: '#888', textAlign: 'right', minWidth: 40, textTransform: 'uppercase', fontFamily: 'monospace', fontWeight: 600, flexShrink: 0 };
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: compact ? '2px 8px' : '3px 8px', borderBottom: '1px solid rgba(255,255,255,0.055)' }}>
-      <div style={{ width: 8, flexShrink: 0 }} />
-      {columns.grade && <span style={{ ...s, minWidth: 26, textAlign: 'center' }}>Grade</span>}
-      <span style={{ flex: 1, fontSize: 9, color: '#555' }}>Card</span>
-      <div style={{ width: 5, flexShrink: 0 }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: compact ? '3px 10px' : '4px 10px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+      <div style={{ width: 10, flexShrink: 0 }} />
+      {columns.grade && <span style={{ ...s, minWidth: 32, textAlign: 'center' }}>Grade</span>}
+      <span style={{ flex: 1, fontSize: 10, color: '#888', fontWeight: 600, textTransform: 'uppercase' }}>Card</span>
+      <div style={{ width: 6, flexShrink: 0 }} />
       {columns.gihwr && <span style={s}>GIH%</span>}
-      {columns.ohwr  && <span style={{ ...s, color: '#444' }}>OH%</span>}
+      {columns.ohwr  && <span style={{ ...s, color: '#666' }}>OH%</span>}
       {columns.gpwr  && <span style={s}>GP%</span>}
       {columns.alsa  && <span style={s}>ALSA</span>}
       {columns.iwd   && <span style={s}>IWD</span>}
@@ -89,27 +96,32 @@ function LoadingBanner({ landsStatus, landsError }) {
   );
 }
 
-// ── Recommended pick bar ──────────────────────────────────────────────────────
-function RecommendationBar({ recommendation }) {
-  if (!recommendation?.primary) return null;
-  const card  = recommendation.primary;
-  const grade = card.stats?.grade;
+// ── "Pack" section header + card count (Section 6B / 6C) ──────────────────────
+function PackSectionHeader({ cardCount, expectedCount, mismatch }) {
   return (
     <div style={{
-      padding: '4px 8px', background: 'rgba(80,200,120,0.08)',
-      borderBottom: '1px solid rgba(80,200,120,0.15)',
-      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+      display: 'flex', alignItems: 'center',
+      padding: '4px 10px',
+      background: 'rgba(255,255,255,0.04)',
+      borderBottom: '1px solid rgba(255,255,255,0.06)',
+      flexShrink: 0,
     }}>
-      <span style={{ fontSize: 10, color: '#7ec8a0' }}>★</span>
-      <span style={{ fontSize: 11, color: '#7ec8a0', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {card.name ?? `#${card.grpId}`}
-        {grade && <span style={{ marginLeft: 5, opacity: 0.8 }}>({grade})</span>}
+      <span style={{
+        fontSize: 10, fontWeight: 800, color: '#a8a8a8',
+        letterSpacing: '0.10em', textTransform: 'uppercase',
+      }}>
+        Pack
       </span>
-      {recommendation.explanation && (
-        <span style={{ fontSize: 9, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
-          {recommendation.explanation}
-        </span>
-      )}
+      <span style={{ flex: 1 }} />
+      <span title={mismatch ? `Expected ${expectedCount} cards for this pick — got ${cardCount}` : undefined}
+            style={{
+        fontSize: 10, fontWeight: 700,
+        color: mismatch ? '#ff8060' : '#888',
+        fontFamily: 'monospace',
+      }}>
+        {cardCount} card{cardCount !== 1 ? 's' : ''}
+        {mismatch && <span style={{ marginLeft: 4 }}>⚠ exp {expectedCount}</span>}
+      </span>
     </div>
   );
 }
@@ -129,31 +141,50 @@ function IdleView() {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function DraftOverlay({ draftState, settings, recommendation }) {
+export default function DraftOverlay({ draftState, settings, recommendation, assistantState }) {
   if (!settings) return null;
 
   const { columns = {}, display = {} } = settings;
   const compact = display.compactMode ?? false;
-  const showRecommendation = display.showRecommendation ?? true;
 
-  const { inDraft, enrichedPack, pickedCards, landsStatus, landsError } = draftState;
+  const { inDraft, enrichedPack, pickedCards, landsStatus, landsError, packId,
+          packEventId, pickNumber, packNumber } = draftState;
 
-  // Resolve basic land names, then sort to match Arena's visual pack layout
+  // Section 6C, step 4: enforce the expected card count for this pick number.
+  // A standard Arena pack has 15 cards minus the pick number (so pick 0 → 15,
+  // pick 1 → 14, ...). If we ever receive more cards than that for the current
+  // pick, that's the ghost-card bug. Truncate and log.
+  const expectedCount = Math.max(1, 15 - (pickNumber ?? 0));
+  const rawCards = enrichedPack ?? [];
+  const overflow = rawCards.length > expectedCount;
+  if (overflow) {
+    console.warn(
+      `[overlay] Card count exceeds expected for P${(packNumber ?? 0) + 1}.${(pickNumber ?? 0) + 1} — `+
+      `got ${rawCards.length}, expected ${expectedCount}. Truncating to expected count. `+
+      `packEventId=${packEventId ?? 'none'}`,
+      rawCards.map(c => c.name ?? `#${c.grpId}`)
+    );
+  }
+
+  // Resolve basic land names, then sort to match Arena's visual pack layout.
+  // Apply the count truncation BEFORE sorting so we don't display ghosts.
   const cards = useMemo(() => {
-    const resolved = (enrichedPack ?? []).map((c) => {
+    const truncated = overflow ? rawCards.slice(0, expectedCount) : rawCards;
+    const resolved = truncated.map((c) => {
       const name = resolveBasicLandName(c);
       return name !== c.name ? { ...c, name } : c;
     });
     const sorted = arenaVisualSort(resolved);
     if (sorted.length > 0) {
-      console.log('[overlay] Pack order:', sorted.map((c, i) =>
-        `${i + 1}. ${c.name ?? `#${c.grpId}`} (${c.rarity?.[0]?.toUpperCase() ?? '?'} coll#${c.collectorNumber ?? '?'})`
-      ).join('\n'));
+      console.log(
+        `[overlay] Pack order (eventId=${packEventId ?? 'n/a'}, ${sorted.length} cards):`,
+        sorted.map((c, i) =>
+          `${i + 1}. ${c.name ?? `#${c.grpId}`} (${c.rarity?.[0]?.toUpperCase() ?? '?'} coll#${c.collectorNumber ?? '?'})`
+        ).join('\n')
+      );
     }
     return sorted;
-  }, [enrichedPack]);
-
-  const recommendedGrpId = recommendation?.primary?.grpId ?? null;
+  }, [enrichedPack, packEventId, expectedCount, overflow, rawCards]);
 
   if (!inDraft) return <IdleView />;
 
@@ -161,8 +192,14 @@ export default function DraftOverlay({ draftState, settings, recommendation }) {
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <LoadingBanner landsStatus={landsStatus} landsError={landsError} />
 
-      {showRecommendation && recommendation && <RecommendationBar recommendation={recommendation} />}
-
+      {/* ── TOP SECTION — "Pack": pure data view, no recommendations here ── */}
+      {cards.length > 0 && (
+        <PackSectionHeader
+          cardCount={cards.length}
+          expectedCount={expectedCount}
+          mismatch={overflow}
+        />
+      )}
       {cards.length > 0 && <ColHeaders columns={columns} compact={compact} />}
 
       <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
@@ -173,26 +210,34 @@ export default function DraftOverlay({ draftState, settings, recommendation }) {
         ) : (
           cards.map((card, i) => (
             <CardRow
-              key={card.grpId ?? i}
+              key={`${packEventId ?? packId ?? 0}-${card.grpId ?? i}`}
               card={card}
               columns={columns}
               compact={compact}
               isTopPick={false}
-              isRecommended={recommendedGrpId != null && card.grpId === recommendedGrpId}
+              isRecommended={false}
             />
           ))
         )}
       </div>
 
-      {/* Picked cards tally */}
       {pickedCards?.length > 0 && (
         <div style={{
-          padding: '4px 10px', fontSize: 10, color: '#555',
-          borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0,
+          padding: '4px 10px', fontSize: 10, color: '#888', fontWeight: 600,
+          borderTop: '1px solid rgba(255,255,255,0.05)',
+          background: 'rgba(255,255,255,0.02)',
+          flexShrink: 0,
         }}>
           {pickedCards.length} picked
         </div>
       )}
+
+      {/* ── BOTTOM SECTION — "Assistant": picks, signals, needs (collapsible) ── */}
+      <AssistantBar
+        assistantState={assistantState}
+        settings={settings}
+        inDraft={inDraft}
+      />
     </div>
   );
 }

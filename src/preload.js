@@ -45,6 +45,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Draft recommendation ─────────────────────────────────────────────────
   getRecommendation: () => ipcRenderer.invoke('draft:get-recommendation'),
 
+  // ── Assistant ─────────────────────────────────────────────────────────────
+  getAssistantState: () => ipcRenderer.invoke('assistant:get-state'),
+
+  onAssistantUpdate: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('assistant-update', h);
+    return () => ipcRenderer.removeListener('assistant-update', h);
+  },
+
+  // ── Test replay ───────────────────────────────────────────────────────────
+  startReplay: (opts) => ipcRenderer.invoke('test:start-replay', opts),
+  stopReplay:  ()     => ipcRenderer.invoke('test:stop-replay'),
+  isReplayActive: ()  => ipcRenderer.invoke('test:is-active'),
+
+  onReplayStarted: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('test:replay-started', h);
+    return () => ipcRenderer.removeListener('test:replay-started', h);
+  },
+  onReplayEnded: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('test:replay-ended', h);
+    return () => ipcRenderer.removeListener('test:replay-ended', h);
+  },
+
   // ── Shell ─────────────────────────────────────────────────────────────────
   openUrl: (url) => ipcRenderer.send('shell:open-url', url),
 

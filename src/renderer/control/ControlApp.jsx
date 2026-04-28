@@ -1,25 +1,33 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import StatusBar from './components/StatusBar';
 import DraftPanel from './components/DraftPanel';
+import AssistantPanel from './components/AssistantPanel';
 import SettingsPanel from '../components/SettingsPanel';
 import { useDraftState } from '../hooks/useDraftState';
 import { useSettings } from '../hooks/useSettings';
+import { useAssistantState } from '../hooks/useAssistantState';
 
 const NAV_TABS = [
-  { id: 'draft', label: 'Draft' },
-  { id: 'settings', label: 'Settings' },
+  { id: 'draft',     label: 'Draft' },
+  { id: 'assistant', label: 'Assistant' },
+  { id: 'settings',  label: 'Settings' },
 ];
 
 export default function ControlApp() {
   const { settings, setSetting, loading: settingsLoading } = useSettings();
   const { draftState, reEnrichWithColorPair } = useDraftState(settings);
+  const assistantState = useAssistantState();
 
   const [activeTab, setActiveTab] = useState('draft');
   const [status, setStatus] = useState('watching');
   const [watcherRunning, setWatcherRunning] = useState(true);
   const [overlayVisible, setOverlayVisible] = useState(true);
+  const [overlayInteractable, setOverlayInteractable] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);  // { version, downloaded }
-  const [version, setVersion] = useState('0.3.1');
+  const [version, setVersion] = useState('0.5.0');
+  const [replayActive, setReplayActive] = useState(false);
+  const [replayInfo, setReplayInfo] = useState(null);
+  const [replayError, setReplayError] = useState(null);
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -33,9 +41,28 @@ export default function ControlApp() {
       window.electronAPI.onUpdateAvailable?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: false }))),
       window.electronAPI.onUpdateDownloaded?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: true }))),
       window.electronAPI.onOverlayVisibilityChanged?.((v) => setOverlayVisible(v)),
+      window.electronAPI.onInteractableChanged?.(setOverlayInteractable),
     ].filter(Boolean);
 
     return () => unsubs.forEach((fn) => fn());
+  }, []);
+
+  // Replay event listeners
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    // Seed current replay state
+    window.electronAPI.isReplayActive?.().then((r) => {
+      if (r?.active) setReplayActive(true);
+    });
+    const unsubStart = window.electronAPI.onReplayStarted?.((info) => {
+      setReplayActive(true);
+      setReplayInfo(info);
+      setReplayError(null);
+    });
+    const unsubEnd = window.electronAPI.onReplayEnded?.(() => {
+      setReplayActive(false);
+    });
+    return () => { unsubStart?.(); unsubEnd?.(); };
   }, []);
 
   const handleToggleOverlay = useCallback(async () => {
@@ -55,6 +82,25 @@ export default function ControlApp() {
     }
   }, [watcherRunning]);
 
+  const handleToggleReplay = useCallback(async () => {
+    if (!window.electronAPI) return;
+    setReplayError(null);
+    if (replayActive) {
+      await window.electronAPI.stopReplay?.();
+      setReplayActive(false);
+      setWatcherRunning(true); // watcher restarted by main process
+    } else {
+      const result = await window.electronAPI.startReplay?.({ pickDelayMs: 2000 });
+      if (result?.ok) {
+        setReplayActive(true);
+        setReplayInfo(result.draftInfo ?? null);
+        setWatcherRunning(false); // watcher paused during replay
+      } else {
+        setReplayError(result?.error ?? 'Failed to start replay');
+      }
+    }
+  }, [replayActive]);
+
   if (settingsLoading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#444' }}>
@@ -65,7 +111,7 @@ export default function ControlApp() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d0d1a', color: '#e0e0e0' }}>
-      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} />
+      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} isInteractable={overlayInteractable} />
 
       {updateInfo && (
         <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.18)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -125,7 +171,7 @@ export default function ControlApp() {
         <button
           onClick={handleToggleWatcher}
           style={{
-            margin: '4px 8px 4px 0', padding: '4px 12px', fontSize: 11,
+            margin: '4px 4px 4px 0', padding: '4px 12px', fontSize: 11,
             background: watcherRunning ? 'rgba(200,80,80,0.2)' : 'rgba(80,200,120,0.2)',
             border: `1px solid ${watcherRunning ? 'rgba(200,80,80,0.4)' : 'rgba(80,200,120,0.4)'}`,
             borderRadius: 4,
@@ -134,18 +180,57 @@ export default function ControlApp() {
           }}
           title={watcherRunning ? 'Stop log watcher' : 'Start log watcher'}
         >
-          {watcherRunning ? 'Stop Watcher' : 'Start Watcher'}
+          {watcherRunning ? 'Stop' : 'Start'} Watcher
+        </button>
+
+        <button
+          onClick={handleToggleReplay}
+          style={{
+            margin: '4px 8px 4px 0', padding: '4px 12px', fontSize: 11,
+            background: replayActive ? 'rgba(200,120,30,0.35)' : 'rgba(100,100,100,0.2)',
+            border: `1px solid ${replayActive ? 'rgba(200,120,30,0.6)' : 'rgba(100,100,100,0.35)'}`,
+            borderRadius: 4,
+            color: replayActive ? '#e8a040' : '#888',
+            cursor: 'pointer',
+            fontWeight: replayActive ? 600 : 400,
+          }}
+          title={replayActive ? 'Stop test replay' : 'Replay last draft from Player.log (2s between picks)'}
+        >
+          {replayActive ? '■ Stop Test' : '▶ Test Mode'}
         </button>
       </div>
+
+      {/* Replay active banner */}
+      {replayActive && replayInfo && (
+        <div style={{ padding: '4px 16px', background: 'rgba(200,120,30,0.2)', borderBottom: '1px solid rgba(200,120,30,0.35)', fontSize: 11, color: '#c89040', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontWeight: 700 }}>TEST MODE</span>
+          <span style={{ color: '#906830' }}>—</span>
+          <span>Replaying {replayInfo.setCode} {replayInfo.format} · {replayInfo.packCount ?? '?'} packs · {replayInfo.pickCount ?? '?'} picks · 2s between events</span>
+        </div>
+      )}
+      {/* Replay error */}
+      {replayError && (
+        <div style={{ padding: '4px 16px', background: 'rgba(200,60,60,0.2)', borderBottom: '1px solid rgba(200,60,60,0.35)', fontSize: 11, color: '#e08080', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>Replay error: {replayError}</span>
+          <button onClick={() => setReplayError(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#e08080', cursor: 'pointer', fontSize: 12 }}>✕</button>
+        </div>
+      )}
 
       {/* Tab content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {activeTab === 'draft' && (
           <DraftPanel
             draftState={draftState}
+            assistantState={assistantState}
             settings={settings}
             onSet={setSetting}
             reEnrichWithColorPair={reEnrichWithColorPair}
+          />
+        )}
+        {activeTab === 'assistant' && (
+          <AssistantPanel
+            assistantState={assistantState}
+            draftState={draftState}
           />
         )}
         {activeTab === 'settings' && (

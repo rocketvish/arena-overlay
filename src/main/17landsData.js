@@ -155,6 +155,8 @@ function scryfallCardData(card) {
     cmc: card.cmc ?? null,
     colorIdentity: card.color_identity?.join('') ?? (card.colors?.join('') ?? ''),
     rarity: card.rarity ?? 'common',
+    typeLine: card.type_line ?? '',
+    oracleText: card.oracle_text ?? '',
   };
 }
 
@@ -311,30 +313,59 @@ function calcGrade(z) {
   return entry ? entry.grade : 'F';
 }
 
+function computeMeanStd(values) {
+  if (values.length === 0) return { mean: 0, std: 0 };
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const std  = Math.sqrt(values.reduce((s, r) => s + (r - mean) ** 2, 0) / values.length);
+  return { mean, std };
+}
+
 function attachGrades(rawCards) {
-  // Only cards with sufficient data participate in mean/std calculation
-  const eligible = rawCards.filter(
+  // Primary metric: GIH% (ever_drawn_win_rate) — best signal for Limited quality.
+  // Fallback metric: GP% (win_rate) — used when GIH% is unavailable (e.g. FDN QuickDraft).
+  // Each metric is graded against its own distribution so z-scores are calibrated correctly.
+
+  const gihEligible = rawCards.filter(
     (c) => c.ever_drawn_win_rate != null && (c.ever_drawn_game_count ?? 0) >= MIN_SAMPLE
   );
+  const gpEligible = rawCards.filter(
+    (c) => c.ever_drawn_win_rate == null && c.win_rate != null && (c.game_count ?? 0) >= MIN_SAMPLE
+  );
 
-  if (eligible.length < 5) {
-    // Not enough data for reliable grades
+  // Build separate distributions so GP% grades are relative to other GP% cards
+  const gihStats = computeMeanStd(gihEligible.map((c) => c.ever_drawn_win_rate));
+  const gpStats  = computeMeanStd(gpEligible.map((c) => c.win_rate));
+
+  const hasGih = gihEligible.length >= 5 && gihStats.std > 0;
+  const hasGp  = gpEligible.length  >= 5 && gpStats.std  > 0;
+
+  if (!hasGih && !hasGp) {
     return rawCards.map((c) => ({ ...c, _grade: null, _lowSample: true }));
   }
 
-  const rates = eligible.map((c) => c.ever_drawn_win_rate);
-  const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
-  const variance = rates.reduce((s, r) => s + (r - mean) ** 2, 0) / rates.length;
-  const std = Math.sqrt(variance);
-
   return rawCards.map((c) => {
-    const wr = c.ever_drawn_win_rate;
-    const sample = c.ever_drawn_game_count ?? 0;
-    const lowSample = sample < MIN_SAMPLE;
-    let grade = null;
-    if (wr != null && std > 0) {
-      grade = calcGrade((wr - mean) / std);
+    const gihWr    = c.ever_drawn_win_rate;
+    const gpWr     = c.win_rate;
+    const gihCount = c.ever_drawn_game_count ?? 0;
+    const gpCount  = c.game_count ?? 0;
+
+    let grade     = null;
+    let lowSample = true;
+
+    if (gihWr != null && hasGih) {
+      // Primary: grade by GIH%
+      lowSample = gihCount < MIN_SAMPLE;
+      if (!lowSample) {
+        grade = calcGrade((gihWr - gihStats.mean) / gihStats.std);
+      }
+    } else if (gpWr != null && hasGp && gihWr == null) {
+      // Fallback: grade by GP% (only when GIH% is genuinely unavailable)
+      lowSample = gpCount < MIN_SAMPLE;
+      if (!lowSample) {
+        grade = calcGrade((gpWr - gpStats.mean) / gpStats.std);
+      }
     }
+
     return { ...c, _grade: grade, _lowSample: lowSample };
   });
 }
@@ -506,4 +537,9 @@ function sendStatus(win, payload) {
   }
 }
 
-module.exports = { fetchSetData, fetchColorPairData, clearCache, resolveArenaIds };
+function getScryfallCardData(grpId) {
+  const cache = loadScryfallCache();
+  return cache[String(grpId)] ?? null;
+}
+
+module.exports = { fetchSetData, fetchColorPairData, clearCache, resolveArenaIds, getScryfallCardData };

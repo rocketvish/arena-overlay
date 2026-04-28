@@ -97,7 +97,7 @@ function ActionBtn({ label, onClick, danger }) {
 // ── Main panel ────────────────────────────────────────────────────────────────
 export default function SettingsPanel({ settings, onSet, onClose }) {
   if (!settings) return null;
-  const { overlay = {}, columns = {}, display = {}, general = {} } = settings;
+  const { overlay = {}, columns = {}, display = {}, general = {}, assistant = {} } = settings;
 
   async function handleClearCache() {
     await window.electronAPI?.clearCache();
@@ -137,6 +137,35 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           <Toggle key={key} label={label} description={desc}
             value={columns[key] ?? false} onChange={(v) => onSet(`columns.${key}`, v)} />
         ))}
+      </Section>
+
+      {/* Draft Assistant */}
+      <Section title="Draft Assistant">
+        <Toggle label="Enable Draft Assistant"
+          description="Analyze color signals, deck needs, and recommend picks"
+          value={assistant.enabled !== false}
+          onChange={(v) => onSet('assistant.enabled', v)} />
+        <Toggle label="Show signals in overlay"
+          description="Color openness pills in the overlay"
+          value={assistant.showSignalsInOverlay !== false}
+          onChange={(v) => onSet('assistant.showSignalsInOverlay', v)} />
+        <Toggle label="Show pick recommendation in overlay"
+          description="★ recommended pick line in the overlay"
+          value={assistant.showRecommendationInOverlay !== false}
+          onChange={(v) => onSet('assistant.showRecommendationInOverlay', v)} />
+        <Slider label="Signal confidence threshold"
+          description="Minimum late packs seen before showing openness labels"
+          value={assistant.confidenceThreshold ?? 4}
+          min={1} max={10} step={1}
+          onChange={(v) => onSet('assistant.confidenceThreshold', v)} />
+        <Select label="Draft style preference"
+          value={assistant.draftStyle ?? 'balanced'}
+          options={[
+            { value: 'best-card', label: 'Best card available' },
+            { value: 'balanced',  label: 'Balanced' },
+            { value: 'signals',   label: 'Prioritize signals' },
+          ]}
+          onChange={(v) => onSet('assistant.draftStyle', v)} />
       </Section>
 
       {/* Display */}

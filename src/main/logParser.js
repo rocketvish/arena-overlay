@@ -89,6 +89,7 @@ const DRAFT_KEYWORDS = ['Draft', 'Pack', 'Pick', 'CardId', 'GrpId', 'DraftPack']
 let state = {
   inDraft: false,
   setCode: null,
+  format: null,   // 17Lands format string detected from EventName (e.g. 'QuickDraft')
   packNumber: 0,
   pickNumber: 0,
   currentPack: [],
@@ -99,6 +100,11 @@ let state = {
 // Arena periodically re-writes the full draft state to the log, which would
 // otherwise cause the same pack to be emitted on every heartbeat.
 let lastEmittedPack = { packNumber: null, pickNumber: null };
+
+// Track the last emitted card-picked to deduplicate replayed pick events.
+// The stale-detection forward-read and initial scan can both replay MakePick
+// lines; without this guard each replay fires card-picked and clears the overlay.
+let lastEmittedPick = { packNumber: null, pickNumber: null };
 
 // ─── Format detection ─────────────────────────────────────────────────────────
 
@@ -143,13 +149,14 @@ const SKIP_RE = /^\[UnityCrossThreadLogger\]|^Mono |^Initialize |^GfxDevice|^Dir
 
 function reset() {
   state = {
-    inDraft: false, setCode: null,
+    inDraft: false, setCode: null, format: null,
     packNumber: 0, pickNumber: 0,
     currentPack: [], pickedCards: [],
   };
   pendingEndpoint = null;
   pendingBuffer   = '';
   lastEmittedPack = { packNumber: null, pickNumber: null };
+  lastEmittedPick = { packNumber: null, pickNumber: null };
 }
 
 function parseLine(line, broadcast) {
@@ -270,13 +277,17 @@ function tryHandleRequest(endpoint, raw) {
     }
   }
 
-  // DraftStatus inline request — extract EventName for set detection
+  // DraftStatus inline request — extract EventName for set + format detection
   if (endpoint.includes('DraftStatus')) {
     if (req.EventName || req.eventName) {
-      const sc = extractSetCode(req.EventName ?? req.eventName);
+      const { setCode: sc, format: fmt } = extractEventInfo(req.EventName ?? req.eventName);
       if (sc && !state.setCode) {
         state.setCode = sc;
         appLogger.log('parser', 'info', `Set code from request: ${sc}`);
+      }
+      if (fmt && !state.format) {
+        state.format = fmt;
+        appLogger.log('parser', 'info', `Format from request: ${fmt}`);
       }
     }
   }
@@ -335,10 +346,29 @@ function tryHandleResponse(endpoint, raw) {
 
 // ─── Core draft payload handler ───────────────────────────────────────────────
 
-function extractSetCode(eventName) {
-  if (!eventName) return null;
+// Maps the first segment of an Arena EventName to a 17Lands format param.
+// Arena event names follow the pattern: <format>_<setCode>_<date>
+// e.g. "QuickDraft_FDN_20241115", "PremierDraft_DSK_20240910"
+const EVENT_FORMAT_MAP = {
+  QuickDraft:    'QuickDraft',
+  PremierDraft:  'PremierDraft',
+  TradDraft:     'TradDraft',
+  Sealed:        'Sealed',
+  // BotDraft = Quick Draft (Arena bot-assisted draft)
+  BotDraft:      'QuickDraft',
+};
+
+function extractEventInfo(eventName) {
+  if (!eventName) return { setCode: null, format: null };
   const parts = eventName.split('_');
-  return parts.length >= 2 ? parts[1] : null;
+  const setCode = parts.length >= 2 ? parts[1] : null;
+  const format = EVENT_FORMAT_MAP[parts[0]] ?? null;
+  return { setCode, format };
+}
+
+// Keep for backwards compat within this file
+function extractSetCode(eventName) {
+  return extractEventInfo(eventName).setCode;
 }
 
 function handleDraftPayload(payload) {
@@ -349,7 +379,8 @@ function handleDraftPayload(payload) {
   const pickNumber  = payload.PickNumber  ?? payload.pickNumber  ?? payload.PickNum;
   const eventName   = payload.EventName   ?? payload.eventName;
   const draftStatus = payload.DraftStatus ?? payload.draftStatus;
-  const setCode     = extractSetCode(eventName) ?? payload.WOTCReleaseId ?? payload.setCode;
+  const { setCode: scFromEvent, format: fmtFromEvent } = extractEventInfo(eventName);
+  const setCode = scFromEvent ?? payload.WOTCReleaseId ?? payload.setCode;
 
   if (!packCards || !Array.isArray(packCards) || packCards.length === 0) {
     appLogger.log('parser', 'debug', `No pack cards in payload (DraftStatus=${draftStatus})`);
@@ -384,6 +415,7 @@ function handleDraftPayload(payload) {
   }
 
   if (setCode) state.setCode = setCode;
+  if (fmtFromEvent) state.format = fmtFromEvent;
   if (packNumber !== undefined && packNumber !== null) state.packNumber = packNumber;
   if (pickNumber !== undefined && pickNumber !== null) state.pickNumber = pickNumber;
   // Explicitly clear previous pack before setting new one (prevents any stale-merge bugs)
@@ -392,9 +424,9 @@ function handleDraftPayload(payload) {
 
   if (!state.inDraft) {
     state.inDraft = true;
-    appLogger.log('parser', 'info', `draft-started setCode=${state.setCode}`);
-    console.log(`[parser] draft-started setCode=${state.setCode}`);
-    emit('draft-started', { setCode: state.setCode });
+    appLogger.log('parser', 'info', `draft-started setCode=${state.setCode} format=${state.format}`);
+    console.log(`[parser] draft-started setCode=${state.setCode} format=${state.format}`);
+    emit('draft-started', { setCode: state.setCode, format: state.format });
   }
 
   // Deduplicate / anti-regression: only emit a pack if it is strictly NEWER
@@ -425,19 +457,44 @@ function handleDraftPayload(payload) {
   }
   lastEmittedPack = { packNumber: state.packNumber, pickNumber: state.pickNumber };
 
-  appLogger.log('parser', 'info', `pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} set=${state.setCode}`);
-  console.log(`[parser] pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} set=${state.setCode}`);
+  // Section 6C: stamp every pack-opened with a unique event ID so downstream
+  // consumers can verify they're not displaying a stale or duplicate pack.
+  // The id encodes (pack, pick, monotonic timestamp) so it differs even if
+  // Arena re-issues the same (pack, pick) — which can happen during pivots.
+  const packEventId = `p${state.packNumber}-i${state.pickNumber}-t${Date.now()}`;
+
+  appLogger.log('parser', 'info', `pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} set=${state.setCode} format=${state.format} eventId=${packEventId}`);
+  console.log(`[parser] pack-opened pack=${state.packNumber} pick=${state.pickNumber} cards=${normalizedPack.length} eventId=${packEventId}`);
   emit('pack-opened', {
+    packEventId,
     packNumber:  state.packNumber,
     pickNumber:  state.pickNumber,
     cards:       normalizedPack,
     setCode:     state.setCode,
+    format:      state.format,
   });
 }
 
 function handlePick(grpId) {
   state.pickedCards = [...state.pickedCards, { grpId }];
   state.pickNumber  = (state.pickNumber || 0) + 1;
+
+  // Deduplicate: only emit if this pick is strictly newer than the last one.
+  // Replayed MakePick lines (from initial scan context or stale forward-reads)
+  // must not re-fire card-picked and clear the renderer's current enrichedPack.
+  const pickIsNewer =
+    lastEmittedPick.packNumber === null ||
+    state.packNumber > lastEmittedPick.packNumber ||
+    (state.packNumber === lastEmittedPick.packNumber &&
+     state.pickNumber > lastEmittedPick.pickNumber);
+
+  if (!pickIsNewer) {
+    appLogger.log('parser', 'debug',
+      `card-picked suppressed (stale) pack=${state.packNumber} pick=${state.pickNumber} ` +
+      `lastPack=${lastEmittedPick.packNumber} lastPick=${lastEmittedPick.pickNumber}`);
+    return;
+  }
+  lastEmittedPick = { packNumber: state.packNumber, pickNumber: state.pickNumber };
 
   appLogger.log('parser', 'info', `card-picked grpId=${grpId} pickNumber=${state.pickNumber}`);
   console.log(`[parser] card-picked grpId=${grpId} pickNumber=${state.pickNumber}`);
