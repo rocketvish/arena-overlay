@@ -412,6 +412,10 @@ function normalizeCard(c, index) {
  * Returns: { data: NormalizedCard[], fromCache: bool } | { data: null, error: string }
  */
 async function fetchSetData(setCode, format = 'PremierDraft', win = null) {
+  // Always use PremierDraft — it has the largest sample size on 17Lands (~10x more
+  // games than QuickDraft) and gives the most reliable grades for card evaluation.
+  // The detected draft format from the Arena log is intentionally ignored here.
+  format = 'PremierDraft';
   const key = cacheKey(setCode, format, '');
 
   // 1. Memory cache
@@ -465,6 +469,7 @@ async function fetchSetData(setCode, format = 'PremierDraft', win = null) {
  * Returns normalized card data with pair-specific stats.
  */
 async function fetchColorPairData(setCode, format = 'PremierDraft', colorPair, win = null) {
+  format = 'PremierDraft'; // always use PremierDraft for best sample size
   const key = cacheKey(setCode, format, colorPair);
 
   const mem = memCache.get(key);
@@ -481,6 +486,7 @@ async function fetchColorPairData(setCode, format = 'PremierDraft', colorPair, w
   const fmtParam = FORMAT_PARAMS[format] ?? format;
   const url = `https://www.17lands.com/card_ratings/data?expansion=${setCode.toUpperCase()}&format=${fmtParam}&colors=${colorPair}`;
   console.log('[17lands] Fetching color pair:', colorPair, url);
+  sendStatus(win, { status: 'fetching', setCode, format, colorPair });
 
   try {
     const raw = await fetchJSON(url);
@@ -491,9 +497,11 @@ async function fetchColorPairData(setCode, format = 'PremierDraft', colorPair, w
 
     writeDiskCache(key, normalized);
     memCache.set(key, { data: normalized, timestamp: Date.now() });
+    sendStatus(win, { status: 'loaded', setCode, format, colorPair, count: normalized.length });
     return { data: normalized, fromCache: false };
   } catch (err) {
     console.error('[17lands] Color pair fetch error:', colorPair, err.message);
+    sendStatus(win, { status: 'error', setCode, format, colorPair, error: err.message });
     return { data: null, error: err.message };
   }
 }
