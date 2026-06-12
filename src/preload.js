@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Auto-updater ──────────────────────────────────────────────────────────
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   quitAndInstall: () => ipcRenderer.send('updater:quit-and-install'),
 
   // ── Draft recommendation ─────────────────────────────────────────────────

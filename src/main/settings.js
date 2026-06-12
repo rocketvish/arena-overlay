@@ -104,6 +104,9 @@ function get() {
 function set(keyPath, value) {
   if (!_settings) _settings = load();
   const keys = keyPath.split('.');
+  if (keys.some((k) => k === '__proto__' || k === 'prototype' || k === 'constructor')) {
+    throw new Error(`Refusing unsafe settings path: ${keyPath}`);
+  }
   let obj = _settings;
   for (let i = 0; i < keys.length - 1; i++) {
     if (!obj[keys[i]] || typeof obj[keys[i]] !== 'object') obj[keys[i]] = {};

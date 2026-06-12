@@ -118,8 +118,16 @@ export default function ControlApp() {
           <span style={{ flex: 1 }}>
             {updateInfo.downloaded
               ? `v${updateInfo.version} ready — restart to install`
-              : `v${updateInfo.version} available — downloading…`}
+              : `v${updateInfo.version} available`}
           </span>
+          {!updateInfo.downloaded && (
+            <button
+              onClick={() => window.electronAPI?.downloadUpdate?.()}
+              style={{ padding: '2px 10px', fontSize: 11, background: 'rgba(80,140,220,0.22)', border: '1px solid rgba(80,140,220,0.45)', borderRadius: 3, color: '#8fb8ff', cursor: 'pointer' }}
+            >
+              Download
+            </button>
+          )}
           {updateInfo.downloaded && (
             <button
               onClick={() => window.electronAPI?.quitAndInstall?.()}

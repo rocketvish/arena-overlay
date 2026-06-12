@@ -1,0 +1,132 @@
+{
+  "project": "arena-overlay-pick-algorithm",
+  "description": "Improve draft pick recommendation: refactor scoreCard into a pluggable pipeline, then add Tier 3 synergy/archetype/wincon scoring, smarter color commitment, and pack-context (wheel/BREAD) scoring.",
+  "tasks": [
+    {
+      "id": "task-001-refactor",
+      "name": "Refactor scoreCard into pluggable component pipeline",
+      "prompt": "Read the current codebase first -- especially src/main/signalAnalyzer.js (focus on scoreCard, computeRecommendation, and the existing weight presets) and src/main/assistantManager.js to understand how analyze() is called.\n\nGoal: Refactor scoreCard so each scoring component is a small pure function with a stable interface, and the final score is a weighted sum produced by a pipeline. Future tasks will plug new components in WITHOUT touching scoreCard internals -- they should only need to register a new component and add a weight.\n\nRequirements:\n1. Define a component interface: each component is `{ id, score(card, ctx) -> number in [0,1], explain?(card, ctx) -> string }` where ctx contains { pickedCards, packCards, colorSignals, deckNeeds, pickNumber, draftStyle, setMetrics, primaryColors }.\n2. Convert the four existing components (base winrate, color alignment, deck needs, color openness) into this shape with ids: 'base', 'colorFit', 'needs', 'openness'. Behavior must be preserved exactly -- same weights, same outputs.\n3. Build a `WEIGHT_PRESETS` table keyed by phase ('early' | 'mid-best' | 'mid-signals' | 'mid-balanced' | 'late') mapping component id -> weight. Phase selection logic moves out of scoreCard into a small `selectPhase(pickNumber, draftStyle)` helper.\n4. scoreCard becomes: resolve phase -> for each registered component, compute score * weight -> sum. Also collect per-component sub-scores so computeRecommendation can build richer explanations.\n5. Export a `registerComponent(component)` function and an internal registry. Existing components are registered at module load. Tests / future tasks can register more.\n6. Update computeRecommendation's explanation builder to use the per-component sub-scores when picking which reason to surface (still keep the current text style; just source it from sub-scores instead of re-checking conditions).\n7. Do NOT add new scoring behavior. This is a pure refactor. Pick recommendations on existing replays must be IDENTICAL.\n\nBefore implementing, plan first and show me the plan. Then implement.\n\nVerify with: node scripts/test-draft.js (if it exercises analyze) and by spot-checking that scoreCard output is unchanged for a few hand-constructed cards. Update CLAUDE.md (create if missing) with a short section documenting the component interface and how to add a new component.",
+      "config": {
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "budget_usd": 5.00,
+        "max_turns": 25,
+        "permission_mode": "auto",
+        "worktree": null,
+        "fast_mode": false
+      },
+      "depends_on": [],
+      "checkpoint": "pause",
+      "on_failure": "retry_once",
+      "context": "This is the foundation for three follow-up tasks (synergy/archetype/wincon, color commitment, pack context) that will each add a new scoring component. The refactor must land cleanly so those tasks are purely additive.",
+      "relevant_files": [
+        "src/main/signalAnalyzer.js",
+        "src/main/assistantManager.js",
+        "src/main/draftTracker.js",
+        "scripts/test-draft.js"
+      ],
+      "ignore_patterns": ["node_modules", "dist", "out", "*.log"],
+      "result": {
+        "status": "queued", "cost_usd": 0.0, "turns_used": 0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+        "summary": "", "error": "", "retry_count": 0, "files_changed": []
+      }
+    },
+    {
+      "id": "task-002-tier3",
+      "name": "Implement Tier 3 detectors and wire as scoring component",
+      "prompt": "Read the current codebase first -- especially src/main/signalAnalyzer.js (note the new component registry from the refactor task), src/main/analysis/synergyDetector.js, src/main/analysis/archetypeDetector.js, and src/main/analysis/winConditionAnalyzer.js (these are stub scaffolds).\n\nGoal: Implement the three Tier 3 analysis modules and add a single new scoring component 'tier3' that uses them to nudge card scores toward synergy, archetype fit, and win-condition support.\n\nRequirements:\n1. synergyDetector.analyzeSynergies(pickedCards, packCards) -> for each pack card, return a synergy score in [0,1] based on shared keywords/themes (tribal types, +1/+1 counters, sacrifice, artifacts, graveyard, tokens, lifegain, spells-matter). Keep heuristics simple and text-based; use oracleText and typeLine. Also return a deck-level theme map: { themeId: strength }.\n2. archetypeDetector.detectArchetype(pickedCards) -> return { primary: archetypeId|null, confidence: 0..1, fits: { archetypeId: score } } across a small set of generic Limited archetypes (aggro, midrange, control, tempo, ramp, tokens, sacrifice, spells-matter). Heuristic: combine creature curve, removal density, card-advantage density, and theme matches.\n3. winConditionAnalyzer.analyzeWinConditions(pickedCards) -> return { hasWincon: bool, types: [...], weakness: string|null }. Detect: big finishers (cmc>=5 evasive/large), token swarm, burn reach, mill, combat tricks density, etc.\n4. Add a new scoring component with id 'tier3' to signalAnalyzer.js. Its score function combines: synergy with current pile (weight 0.5), archetype fit of card vs detected archetype (weight 0.3), and 'fills missing wincon' bonus (weight 0.2). Output normalized to [0,1].\n5. Register 'tier3' with weights: early 0.05, mid-balanced 0.10, mid-best 0.05, mid-signals 0.10, late 0.15. Reduce existing weights proportionally so each preset still sums to 1.0.\n6. Wire the detector outputs into the analyze() return so the UI can display archetype + wincon status. Do NOT build UI -- just expose the data on the analysis object as `archetype`, `winConditions`, `synergyThemes`.\n7. Keep all detectors PURE. No I/O, no state.\n\nBefore implementing, plan first and show me the plan. Then implement. Run scripts/test-draft.js after. Update CLAUDE.md with the new component and what each detector returns.",
+      "config": {
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "budget_usd": 6.00,
+        "max_turns": 30,
+        "permission_mode": "auto",
+        "worktree": "tier3",
+        "fast_mode": false
+      },
+      "depends_on": ["task-001-refactor"],
+      "checkpoint": "auto",
+      "on_failure": "retry_once",
+      "context": "Builds on the pluggable component pipeline from task-001. Must only ADD a component, not modify existing ones.",
+      "relevant_files": [
+        "src/main/signalAnalyzer.js",
+        "src/main/analysis/synergyDetector.js",
+        "src/main/analysis/archetypeDetector.js",
+        "src/main/analysis/winConditionAnalyzer.js",
+        "src/main/assistantManager.js",
+        "scripts/test-draft.js"
+      ],
+      "ignore_patterns": ["node_modules", "dist", "out", "src/renderer", "*.log"],
+      "result": {
+        "status": "queued", "cost_usd": 0.0, "turns_used": 0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+        "summary": "", "error": "", "retry_count": 0, "files_changed": []
+      }
+    },
+    {
+      "id": "task-003-color-commitment",
+      "name": "Smarter color commitment / pivot / splash logic",
+      "prompt": "Read the current codebase first -- especially src/main/signalAnalyzer.js (note the new component registry from task-001, particularly the existing 'colorFit' component which is a harsh in/out binary).\n\nGoal: Replace the binary color-fit component with a continuous, signal-aware version that supports speculative early picks, pivoting when signals say a color is cut, and splashing a third color when the card is bomb-tier.\n\nRequirements:\n1. Add a new scoring component with id 'colorFitV2' that supersedes 'colorFit'. Do NOT delete 'colorFit' -- replace its registration with 'colorFitV2' so it can be reverted easily.\n2. Logic:\n   - Picks 1-2: color identity is essentially free. Score = base card quality bias only (return 0.85 for any card; 1.0 for known bombs by gihwr percentile).\n   - Picks 3-5: soft commitment. Compute primary color affinity from pickedCards. In-color = 1.0, off-color but with strong openness signal (>=70) on that color = 0.65, off-color and contested = 0.25, off-color and cut = 0.05.\n   - Picks 6+: hard commitment to top-2 colors UNLESS a pivot is justified. A pivot is justified when (a) one of your committed colors has a 'Cut Off' or 'Hard Cut' signal AND (b) you have <=4 cards in that color. In that case, treat the cut color as no longer committed for scoring.\n   - Splash logic: a third color is allowed if the card's base score (gihwr) is in the top 10% of the set AND pickedCards already contain >=1 fixing source. Splash cards get 0.7 instead of 0.0.\n3. Add a `getCommitmentState(pickedCards, colorSignals, pickNumber)` helper returning { committed: [c1,c2], pivotingFrom: c|null, splashAllowed: bool, reason: string }. Expose this on the analyze() output as `commitmentState` so the UI can show it later.\n4. Update WEIGHT_PRESETS so 'colorFitV2' uses the same weights the old 'colorFit' had. No other component weights change.\n5. The component must read setMetrics from ctx to compute the 'top 10%' threshold for splash logic.\n\nBefore implementing, plan first and show me the plan. Then implement. Run scripts/test-draft.js and add a couple of unit-style assertions in scripts/test-draft.js (or a sibling script) for: pick-1 free pick, pick-7 hard cut pivot, pick-9 bomb splash. Update CLAUDE.md.",
+      "config": {
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "budget_usd": 5.00,
+        "max_turns": 25,
+        "permission_mode": "auto",
+        "worktree": "color-commitment",
+        "fast_mode": false
+      },
+      "depends_on": ["task-001-refactor"],
+      "checkpoint": "auto",
+      "on_failure": "retry_once",
+      "context": "Builds on task-001. Independent of task-002 -- expect a merge conflict in the component registry that you (the human) will resolve manually.",
+      "relevant_files": [
+        "src/main/signalAnalyzer.js",
+        "src/main/draftTracker.js",
+        "src/main/assistantManager.js",
+        "scripts/test-draft.js"
+      ],
+      "ignore_patterns": ["node_modules", "dist", "out", "src/renderer", "src/main/analysis", "*.log"],
+      "result": {
+        "status": "queued", "cost_usd": 0.0, "turns_used": 0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+        "summary": "", "error": "", "retry_count": 0, "files_changed": []
+      }
+    },
+    {
+      "id": "task-004-pack-context",
+      "name": "Pack-context scoring: wheel probability and BREAD-style relative tiering",
+      "prompt": "Read the current codebase first -- especially src/main/signalAnalyzer.js (note the component registry from task-001) and src/main/draftTracker.js to confirm what pack metadata is available (packNumber, pickNumber, pack contents).\n\nGoal: Scores today are absolute. Add a 'packContext' component that scores a card RELATIVE to what else is in the pack -- so a B-tier card that's the best thing in a weak pack becomes more attractive, and an A-tier card with an A+ next to it becomes slightly less so. Also account for wheel probability: in pack 1, low picks (1-3) where the card is unlikely to wheel deserve more weight than late picks where you might see it again.\n\nRequirements:\n1. Add scoring component 'packContext' with score(card, ctx).\n2. Relative tiering: compute the distribution of base scores in the current pack. Score = a sigmoid of (card.baseScore - packMean) / packStd, scaled to [0,1]. Cards meaningfully above the pack mean get >0.7; meaningfully below get <0.3.\n3. Wheel probability: the chance a card 'wheels' back to you depends on pickNumber within the pack and how many other cards in the pack share its colors and tier. Approximate: wheelProb = max(0, (pickNumber - 4) / 10) for in-color cards, halved if there are >=2 strictly-better cards in the pack. Use this only to MODULATE the relative tier score: finalScore = relativeTier * (1 - 0.3 * wheelProb). The intuition: if it'll wheel, it's less urgent now.\n4. Expose helpers `computePackTierStats(packCards)` and `estimateWheelProb(card, packCards, pickNumber)` from signalAnalyzer.js so future tasks (and tests) can reuse them.\n5. Register 'packContext' with weights: early 0.05, mid-balanced 0.10, mid-best 0.10, mid-signals 0.05, late 0.05. Reduce existing weights proportionally so each preset sums to 1.0.\n6. Component must be PURE -- only reads from ctx.\n\nBefore implementing, plan first and show me the plan. Then implement. Add a small assertion in scripts/test-draft.js: a B-tier card in an otherwise-bad pack should outscore the same card in a strong pack. Update CLAUDE.md.",
+      "config": {
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "budget_usd": 5.00,
+        "max_turns": 25,
+        "permission_mode": "auto",
+        "worktree": "pack-context",
+        "fast_mode": false
+      },
+      "depends_on": ["task-001-refactor"],
+      "checkpoint": "auto",
+      "on_failure": "retry_once",
+      "context": "Builds on task-001. Independent of tasks 002 and 003 -- expect a merge conflict in the component registry that you (the human) will resolve manually.",
+      "relevant_files": [
+        "src/main/signalAnalyzer.js",
+        "src/main/draftTracker.js",
+        "src/main/assistantManager.js",
+        "scripts/test-draft.js"
+      ],
+      "ignore_patterns": ["node_modules", "dist", "out", "src/renderer", "src/main/analysis", "*.log"],
+      "result": {
+        "status": "queued", "cost_usd": 0.0, "turns_used": 0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+        "summary": "", "error": "", "retry_count": 0, "files_changed": []
+      }
+    }
+  ]
+}

@@ -14,6 +14,127 @@ const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
 let overlayWindow = null;
 let isInteractable = false;
 
+const DRAFT_FORMATS = new Set(['PremierDraft', 'QuickDraft', 'TradDraft', 'Sealed']);
+const COLOR_PAIRS = new Set(['W', 'U', 'B', 'R', 'G', 'WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG']);
+
+const SETTING_VALIDATORS = {
+  'overlay.opacity': (v) => typeof v === 'number' && v >= 0.1 && v <= 1,
+  'overlay.visible': (v) => typeof v === 'boolean',
+  'columns.grade': (v) => typeof v === 'boolean',
+  'columns.gihwr': (v) => typeof v === 'boolean',
+  'columns.ohwr': (v) => typeof v === 'boolean',
+  'columns.gpwr': (v) => typeof v === 'boolean',
+  'columns.alsa': (v) => typeof v === 'boolean',
+  'columns.iwd': (v) => typeof v === 'boolean',
+  'assistant.enabled': (v) => typeof v === 'boolean',
+  'assistant.showSignalsInOverlay': (v) => typeof v === 'boolean',
+  'assistant.showRecommendationInOverlay': (v) => typeof v === 'boolean',
+  'assistant.confidenceThreshold': (v) => Number.isInteger(v) && v >= 1 && v <= 10,
+  'assistant.draftStyle': (v) => ['best-card', 'balanced', 'signals'].includes(v),
+  'display.showRecommendation': (v) => typeof v === 'boolean',
+  'display.compactMode': (v) => typeof v === 'boolean',
+  'display.sortBy': (v) => ['grade', 'gihwr', 'ohwr', 'gpwr', 'alsa', 'iwd', 'color', 'name'].includes(v),
+  'display.colorFilter': (v) => v === 'all' || COLOR_PAIRS.has(v),
+  'general.draftFormat': (v) => DRAFT_FORMATS.has(v),
+  'general.arenaLogPath': (v) => typeof v === 'string' && v.length > 0 && v.length <= 1000 && !v.includes('\0'),
+  'general.hotkey_toggle': (v) => typeof v === 'string' && v.length <= 100,
+  'general.hotkey_interact': (v) => typeof v === 'string' && v.length <= 100,
+  'general.autoLaunch': (v) => typeof v === 'boolean',
+  'general.runOnStartup': (v) => typeof v === 'boolean',
+  'general.minimizeToTray': (v) => typeof v === 'boolean',
+};
+
+function assertTrustedSender(event) {
+  const url = event?.senderFrame?.url ?? '';
+  if (!isTrustedAppUrl(url)) {
+    throw new Error('Rejected IPC from untrusted renderer');
+  }
+}
+
+function isTrustedAppUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (isDev) {
+      return parsed.origin === 'http://localhost:5173';
+    }
+    return parsed.protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedExternalUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const allowedHosts = new Set(['www.17lands.com', '17lands.com', 'scryfall.com', 'www.scryfall.com']);
+    return parsed.protocol === 'https:' && allowedHosts.has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeSetCode(setCode) {
+  if (typeof setCode !== 'string') throw new Error('Invalid set code');
+  const normalized = setCode.trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,8}$/.test(normalized)) throw new Error('Invalid set code');
+  return normalized;
+}
+
+function sanitizeFormat(format) {
+  if (format == null || format === '') return 'PremierDraft';
+  if (!DRAFT_FORMATS.has(format)) throw new Error('Invalid draft format');
+  return format;
+}
+
+function sanitizeColorPair(colorPair) {
+  if (typeof colorPair !== 'string') throw new Error('Invalid color pair');
+  const normalized = colorPair.trim().toUpperCase();
+  if (!COLOR_PAIRS.has(normalized)) throw new Error('Invalid color pair');
+  return normalized;
+}
+
+function sanitizeArenaIds(grpIds) {
+  if (!Array.isArray(grpIds) || grpIds.length > 100) throw new Error('Invalid Arena ID list');
+  return grpIds.map((id) => {
+    const n = Number(id);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error('Invalid Arena ID');
+    return n;
+  });
+}
+
+function sanitizeReplayOptions(opts) {
+  const safe = {};
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'pickDelayMs')) {
+    const delay = Number(opts.pickDelayMs);
+    if (!Number.isFinite(delay) || delay < 100 || delay > 30000) throw new Error('Invalid replay delay');
+    safe.pickDelayMs = delay;
+  }
+  return safe;
+}
+
+function sanitizeSetting(keyPath, value) {
+  if (typeof keyPath !== 'string' || keyPath.includes('__proto__') || keyPath.includes('constructor') || keyPath.includes('prototype')) {
+    throw new Error('Invalid setting key');
+  }
+  const validate = SETTING_VALIDATORS[keyPath];
+  if (!validate || !validate(value)) throw new Error(`Invalid setting value for ${keyPath}`);
+  return { keyPath, value };
+}
+
+function hardenWindowNavigation(win) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedAppUrl(url)) {
+      event.preventDefault();
+      if (isAllowedExternalUrl(url)) shell.openExternal(url);
+    }
+  });
+}
+
 // ─── Broadcast helper ────────────────────────────────────────────────────────
 
 function sendToWindows(channel, data) {
@@ -70,6 +191,7 @@ function createOverlayWindow() {
     },
   });
 
+  hardenWindowNavigation(overlayWindow);
   setClickThrough(true);
 
   if (isDev) {
@@ -113,32 +235,49 @@ function saveWindowBounds() {
 
 function registerIPC() {
   // ── Settings ──────────────────────────────────────────────────────────────
-  ipcMain.handle('settings:get', () => settings.get());
+  ipcMain.handle('settings:get', (event) => {
+    assertTrustedSender(event);
+    return settings.get();
+  });
 
-  ipcMain.handle('settings:set', (_event, keyPath, value) => {
-    const updated = settings.set(keyPath, value);
-    if (keyPath === 'overlay.opacity') overlayWindow?.setOpacity(value);
-    if (keyPath === 'overlay.visible') {
-      value ? overlayWindow?.show() : overlayWindow?.hide();
-      broadcastToAll('overlay-visibility-changed', value);
+  ipcMain.handle('settings:set', (event, keyPath, value) => {
+    assertTrustedSender(event);
+    const safe = sanitizeSetting(keyPath, value);
+    const updated = settings.set(safe.keyPath, safe.value);
+    if (safe.keyPath === 'overlay.opacity') overlayWindow?.setOpacity(safe.value);
+    if (safe.keyPath === 'overlay.visible') {
+      safe.value ? overlayWindow?.show() : overlayWindow?.hide();
+      broadcastToAll('overlay-visibility-changed', safe.value);
     }
     // Broadcast to all windows so they update in real-time
     broadcastToAll('settings-changed', updated);
     return updated;
   });
 
-  ipcMain.handle('settings:reset', () => settings.reset());
+  ipcMain.handle('settings:reset', (event) => {
+    assertTrustedSender(event);
+    return settings.reset();
+  });
 
   // ── Overlay controls ──────────────────────────────────────────────────────
-  ipcMain.on('overlay:toggle-interact', () => setClickThrough(isInteractable));
-  ipcMain.on('overlay:toggle-visibility', () => {
+  ipcMain.on('overlay:toggle-interact', (event) => {
+    assertTrustedSender(event);
+    setClickThrough(isInteractable);
+  });
+  ipcMain.on('overlay:toggle-visibility', (event) => {
+    assertTrustedSender(event);
     if (!overlayWindow) return;
     const nowVisible = !overlayWindow.isVisible();
     nowVisible ? overlayWindow.show() : overlayWindow.hide();
     broadcastToAll('overlay-visibility-changed', nowVisible);
   });
-  ipcMain.handle('overlay:get-visible', () => overlayWindow?.isVisible() ?? false);
-  ipcMain.handle('overlay:set-visible', (_event, visible) => {
+  ipcMain.handle('overlay:get-visible', (event) => {
+    assertTrustedSender(event);
+    return overlayWindow?.isVisible() ?? false;
+  });
+  ipcMain.handle('overlay:set-visible', (event, visible) => {
+    assertTrustedSender(event);
+    if (typeof visible !== 'boolean') throw new Error('Invalid visibility value');
     if (!overlayWindow) return false;
     visible ? overlayWindow.show() : overlayWindow.hide();
     broadcastToAll('overlay-visibility-changed', visible);
@@ -146,90 +285,115 @@ function registerIPC() {
   });
 
   // ── Log watcher ───────────────────────────────────────────────────────────
-  ipcMain.on('log-watcher:restart', () => logWatcher.startWatching(broadcastToAll));
+  ipcMain.on('log-watcher:restart', (event) => {
+    assertTrustedSender(event);
+    logWatcher.startWatching(broadcastToAll);
+  });
 
   // ── Log watcher start/stop (from control window) ──────────────────────────
-  ipcMain.handle('control:start-watcher', () => {
+  ipcMain.handle('control:start-watcher', (event) => {
+    assertTrustedSender(event);
     logWatcher.startWatching(broadcastToAll);
     return { running: true };
   });
 
-  ipcMain.handle('control:stop-watcher', () => {
+  ipcMain.handle('control:stop-watcher', (event) => {
+    assertTrustedSender(event);
     logWatcher.stopWatching();
     return { running: false };
   });
 
-  ipcMain.handle('watcher:status', () => {
+  ipcMain.handle('watcher:status', (event) => {
+    assertTrustedSender(event);
     return { running: logWatcher.isRunning() };
   });
 
   // ── Stats ─────────────────────────────────────────────────────────────────
-  ipcMain.handle('stats:get', () => logWatcher.getStats());
+  ipcMain.handle('stats:get', (event) => {
+    assertTrustedSender(event);
+    return logWatcher.getStats();
+  });
 
   // ── 17Lands data ──────────────────────────────────────────────────────────
-  ipcMain.handle('17lands:fetch-set', async (_event, setCode, format) => {
-    const result = await landsData.fetchSetData(setCode, format, { send: broadcastToAll });
+  ipcMain.handle('17lands:fetch-set', async (event, setCode, format) => {
+    assertTrustedSender(event);
+    const result = await landsData.fetchSetData(sanitizeSetCode(setCode), sanitizeFormat(format), { send: broadcastToAll });
     return result;
   });
 
-  ipcMain.handle('17lands:fetch-color-pair', async (_event, setCode, format, colorPair) => {
-    const result = await landsData.fetchColorPairData(setCode, format, colorPair, { send: broadcastToAll });
+  ipcMain.handle('17lands:fetch-color-pair', async (event, setCode, format, colorPair) => {
+    assertTrustedSender(event);
+    const result = await landsData.fetchColorPairData(
+      sanitizeSetCode(setCode),
+      sanitizeFormat(format),
+      sanitizeColorPair(colorPair),
+      { send: broadcastToAll }
+    );
     return result;
   });
 
-  ipcMain.handle('17lands:clear-cache', (_event, setCode, format) => {
-    landsData.clearCache(setCode, format);
+  ipcMain.handle('17lands:clear-cache', (event, setCode, format) => {
+    assertTrustedSender(event);
+    const safeSetCode = setCode == null || setCode === '' ? null : sanitizeSetCode(setCode);
+    const safeFormat = format == null || format === '' ? null : sanitizeFormat(format);
+    landsData.clearCache(safeSetCode, safeFormat);
     return { ok: true };
   });
 
   // ── Scryfall ID resolution ─────────────────────────────────────────────────
-  ipcMain.handle('scryfall:resolve-ids', async (_event, grpIds) => {
-    return landsData.resolveArenaIds(grpIds);
+  ipcMain.handle('scryfall:resolve-ids', async (event, grpIds) => {
+    assertTrustedSender(event);
+    return landsData.resolveArenaIds(sanitizeArenaIds(grpIds));
   });
 
   // ── App version ───────────────────────────────────────────────────────────
-  ipcMain.handle('app:get-version', () => app.getVersion());
+  ipcMain.handle('app:get-version', (event) => {
+    assertTrustedSender(event);
+    return app.getVersion();
+  });
 
   // ── Open external URL ─────────────────────────────────────────────────────
-  ipcMain.on('shell:open-url', (_event, url) => {
-    try {
-      const parsed = new URL(url);
-      const allowed = ['www.17lands.com', '17lands.com', 'scryfall.com', 'www.scryfall.com'];
-      if (allowed.includes(parsed.hostname)) {
-        shell.openExternal(url);
-      }
-    } catch {
+  ipcMain.on('shell:open-url', (event, url) => {
+    assertTrustedSender(event);
+    if (isAllowedExternalUrl(url)) {
+      shell.openExternal(url);
+    } else {
       console.warn('[main] Invalid URL rejected:', url);
     }
   });
 
   // ── Recommendation ────────────────────────────────────────────────────────
-  ipcMain.handle('draft:get-recommendation', async () => {
+  ipcMain.handle('draft:get-recommendation', async (event) => {
+    assertTrustedSender(event);
     // Recommendation is computed in pack-opened handler and cached
     return null; // Handled via broadcast
   });
 
   // ── Assistant ─────────────────────────────────────────────────────────────
-  ipcMain.handle('assistant:get-state', () => {
+  ipcMain.handle('assistant:get-state', (event) => {
+    assertTrustedSender(event);
     return assistantManager.getState();
   });
 
   // ── Test replay ───────────────────────────────────────────────────────────
-  ipcMain.handle('test:start-replay', async (_event, opts) => {
+  ipcMain.handle('test:start-replay', async (event, opts) => {
+    assertTrustedSender(event);
     // Pause the live log watcher so it doesn't interfere with replay events
     logWatcher.stopWatching();
-    const result = await testReplay.startReplay(broadcastToAll, opts ?? {});
+    const result = await testReplay.startReplay(broadcastToAll, sanitizeReplayOptions(opts));
     return result;
   });
 
-  ipcMain.handle('test:stop-replay', () => {
+  ipcMain.handle('test:stop-replay', (event) => {
+    assertTrustedSender(event);
     const result = testReplay.stopReplay();
     // Restart the live watcher after stopping replay
     logWatcher.startWatching(broadcastToAll);
     return result;
   });
 
-  ipcMain.handle('test:is-active', () => {
+  ipcMain.handle('test:is-active', (event) => {
+    assertTrustedSender(event);
     return { active: testReplay.isActive() };
   });
 }
@@ -266,8 +430,8 @@ function setupAutoUpdater() {
   try {
     const { autoUpdater } = require('electron-updater');
     autoUpdaterInstance = autoUpdater;
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
 
     autoUpdater.on('update-available', (info) => {
       appLogger.log('autoUpdater', 'info', 'Update available', info.version);
@@ -292,7 +456,8 @@ function setupAutoUpdater() {
 }
 
 function registerUpdateIPC() {
-  ipcMain.handle('updater:check', async () => {
+  ipcMain.handle('updater:check', async (event) => {
+    assertTrustedSender(event);
     if (!autoUpdaterInstance) return { error: 'Updater not available' };
     try {
       await autoUpdaterInstance.checkForUpdates();
@@ -302,7 +467,19 @@ function registerUpdateIPC() {
     }
   });
 
-  ipcMain.on('updater:quit-and-install', () => {
+  ipcMain.handle('updater:download', async (event) => {
+    assertTrustedSender(event);
+    if (!autoUpdaterInstance) return { error: 'Updater not available' };
+    try {
+      await autoUpdaterInstance.downloadUpdate();
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.on('updater:quit-and-install', (event) => {
+    assertTrustedSender(event);
     if (autoUpdaterInstance && updateDownloaded) {
       autoUpdaterInstance.quitAndInstall();
     }
