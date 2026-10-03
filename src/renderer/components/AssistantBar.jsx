@@ -5,8 +5,8 @@ const COLOR_NAMES = { W: 'W', U: 'U', B: 'B', R: 'R', G: 'G' };
 const COLOR_HEX   = { W: '#f5e664', U: '#50a0ff', B: '#b090e0', R: '#f06464', G: '#50b95a' };
 
 function signalColor(score) {
-  if (score >= 70) return '#50c87a'; // green — open
-  if (score >= 45) return '#c8b830'; // yellow — contested
+  if (score >= 60) return '#50c87a'; // green — open (matches the "Open" label)
+  if (score >= 40) return '#c8b830'; // yellow — contested
   return '#d05050';                  // red — cut
 }
 
@@ -81,6 +81,7 @@ const PICK_KIND_STYLE = {
   upside: { icon: '⚡', color: '#ffce5c', label: 'UPSIDE' },
   need:   { icon: '🔧', color: '#e88c64', label: 'NEED' },
   clear:  { icon: '★', color: '#7ec8a0', label: 'CLEAR' },
+  wheel:  { icon: '⟲', color: '#c89cff', label: 'WHEEL' },
 };
 
 function PicksList({ picks }) {
@@ -90,7 +91,7 @@ function PicksList({ picks }) {
         const s = PICK_KIND_STYLE[p.kind] ?? PICK_KIND_STYLE.safe;
         const cardName = p.card?.name ?? `#${p.card?.grpId ?? '?'}`;
         return (
-          <div key={i} style={{
+          <div key={i} title={p.reasonLong ?? p.reason} style={{
             display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, lineHeight: 1.3,
           }}>
             <span style={{ color: s.color, flexShrink: 0, fontSize: 12 }}>{s.icon}</span>

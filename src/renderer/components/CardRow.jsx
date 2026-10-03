@@ -48,16 +48,18 @@ const GRADE_BADGE = {
 const GRADE_UNKNOWN = { bg: 'rgba(100,100,100,0.15)', border: 'rgba(100,100,100,0.3)', text: '#888' };
 
 // grade=string → show badge; grade=null hasData=true → "N/A" (found but no data yet);
-// grade=null hasData=false → "?" (not found in 17Lands at all)
-function GradeBadge({ grade, hasLandsData }) {
+// grade=null hasData=false → "?" (not found in 17Lands at all).
+// Estimated grades (17Lands withholds GIH% under 500 games) get a "~" and a
+// dashed border so they're never mistaken for measured ones.
+function GradeBadge({ grade, hasLandsData, estimated }) {
   const s = GRADE_BADGE[grade] ?? GRADE_UNKNOWN;
-  const label = grade ?? (hasLandsData ? 'N/A' : '?');
+  const label = grade ? (estimated ? `~${grade}` : grade) : (hasLandsData ? 'N/A' : '?');
   return (
     <div style={{
       minWidth: 32, padding: '2px 4px',
-      background: s.bg, border: `1.5px solid ${s.border}`,
+      background: s.bg, border: `1.5px ${estimated ? 'dashed' : 'solid'} ${s.border}`,
       borderRadius: 4, textAlign: 'center',
-      fontSize: grade ? 13 : 10, fontWeight: grade ? 800 : 500,
+      fontSize: grade ? (estimated ? 11 : 13) : 10, fontWeight: grade ? 800 : 500,
       color: grade ? s.text : '#888',
       letterSpacing: grade ? '-0.02em' : 0,
       flexShrink: 0,
@@ -90,14 +92,37 @@ function Stat({ value, show, format, secondary, primary }) {
 }
 
 function pct(v) { return v != null ? `${(v * 100).toFixed(1)}%` : null; }
+function estPct(v) { return v != null ? `~${(v * 100).toFixed(1)}` : null; }
 function ata(v) { return v != null ? v.toFixed(1) : null; }
 function iwd(v) { return v != null ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}` : null; }
+
+function cardTooltip(card) {
+  const s = card.stats;
+  if (!card.hasLandsData || !s) return `${card.name ?? '#' + card.grpId} — not in 17Lands data`;
+  const n = (v) => (v ?? 0).toLocaleString();
+  const lines = [card.name];
+  if (s.gihwr != null) {
+    lines.push(`GIH WR ${pct(s.gihwr)} over ${n(s.sampleSize)} drawn games`);
+  } else if (s.gradeEstimated && s.gihwrEst != null) {
+    lines.push(`GIH WR withheld by 17Lands (${n(s.sampleSize)} drawn games, needs 500).`);
+    lines.push(`Estimated ${pct(s.gihwrEst)} from GP WR ${pct(s.gpwr)} over ${n(s.gameCount)} games.`);
+  } else if (s.gradeEstimated) {
+    lines.push(`17Lands has no GIH WR for this set yet; graded from GP WR ${pct(s.gpwr)} over ${n(s.gameCount)} games.`);
+  } else {
+    lines.push(`Not enough games for a grade yet (${n(s.gameCount)} played).`);
+  }
+  if (s.ata != null) lines.push(`17Lands drafters take it ~pick ${s.ata.toFixed(1)} (ATA); last seen ~pick ${s.alsa?.toFixed(1) ?? '—'} (ALSA)`);
+  lines.push('Right-click: open on 17Lands');
+  return lines.join('\n');
+}
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function CardRow({ card, columns, compact, isTopPick, isRecommended }) {
   const { name, color, rarity, stats, hasLandsData } = card;
   const grade = stats?.grade ?? null;
+  const estimated = !!stats?.gradeEstimated;
   const lowSample = stats?.lowSample ?? false;
+  const tooltip = cardTooltip(card);
   const rarityColor = RARITY_COLOR[rarity] ?? '#a0a0a0';
   const highlighted = isRecommended || isTopPick;
   const baseBg = isRecommended
@@ -115,6 +140,7 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
   return (
     <div
       onContextMenu={handleContextMenu}
+      title={tooltip}
       style={{
         display: 'flex', alignItems: 'center', gap: 7,
         padding: compact ? '4px 10px' : '8px 10px',
@@ -122,7 +148,7 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
         background: baseBg,
         border: isRecommended ? '1px solid rgba(80,200,120,0.25)' : '1px solid transparent',
         transition: 'background 0.12s',
-        opacity: lowSample ? 0.65 : 1,
+        opacity: lowSample && !grade ? 0.65 : 1,
         cursor: 'context-menu',
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
@@ -135,7 +161,7 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
       }
 
       {/* Grade badge */}
-      {columns.grade && <GradeBadge grade={grade} hasLandsData={hasLandsData} />}
+      {columns.grade && <GradeBadge grade={grade} hasLandsData={hasLandsData} estimated={estimated} />}
 
       {/* Card name */}
       <span style={{
@@ -144,16 +170,20 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
         textShadow: '0 1px 2px rgba(0,0,0,0.6)',
       }}>
         {name ?? `#${card.grpId}`}
-        {lowSample && <span title="Low sample size (<200 games)" style={{ marginLeft: 4, fontSize: 10, color: '#c8a040' }}>⚠</span>}
+        {lowSample && !grade && hasLandsData && <span style={{ marginLeft: 4, fontSize: 10, color: '#c8a040' }}>⚠</span>}
       </span>
 
       {/* Rarity dot */}
       <div style={{ width: 6, height: 6, borderRadius: '50%', background: rarityColor, flexShrink: 0 }} />
 
       {/* Stats — GIHWR is the primary scanning column, render bold/white */}
-      <Stat value={stats?.gihwr} show={columns.gihwr} format={pct} primary />
+      {/* GIH% — 17Lands' measured value, or a dimmed "~" estimate when it's withheld */}
+      {stats?.gihwr == null && stats?.gihwrEst != null
+        ? <Stat value={stats.gihwrEst} show={columns.gihwr} format={estPct} secondary />
+        : <Stat value={stats?.gihwr} show={columns.gihwr} format={pct} primary />}
       <Stat value={stats?.ohwr}  show={columns.ohwr}  format={pct}  secondary />
       <Stat value={stats?.gpwr}  show={columns.gpwr}  format={pct} />
+      <Stat value={stats?.ata}   show={columns.ata}   format={ata} />
       <Stat value={stats?.alsa}  show={columns.alsa}  format={ata} />
       <Stat value={stats?.iwd}   show={columns.iwd}   format={iwd} />
     </div>

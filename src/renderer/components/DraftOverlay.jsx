@@ -70,6 +70,7 @@ function ColHeaders({ columns, compact }) {
       {columns.gihwr && <span style={s}>GIH%</span>}
       {columns.ohwr  && <span style={{ ...s, color: '#666' }}>OH%</span>}
       {columns.gpwr  && <span style={s}>GP%</span>}
+      {columns.ata   && <span style={s} title="Average pick at which 17Lands drafters take this card">ATA</span>}
       {columns.alsa  && <span style={s}>ALSA</span>}
       {columns.iwd   && <span style={s}>IWD</span>}
     </div>
@@ -77,7 +78,15 @@ function ColHeaders({ columns, compact }) {
 }
 
 // ── Loading / error / no-data banner ─────────────────────────────────────────
-function LoadingBanner({ landsStatus, landsError }) {
+function LoadingBanner({ landsStatus, landsError, landsStale, landsStaleReason, landsFetchedAt }) {
+  if (landsStatus === 'loaded' && landsStale) {
+    return (
+      <div style={{ padding: '5px 10px', fontSize: 10, background: 'rgba(80,70,20,0.4)', color: '#d8c070', borderBottom: '1px solid rgba(255,255,255,0.04)' }}
+           title={landsStaleReason ?? undefined}>
+        ⏱ Showing 17Lands data from {formatAge(landsFetchedAt)} — {landsStaleReason ?? 'could not refresh'}
+      </div>
+    );
+  }
   if (!landsStatus || landsStatus === 'loaded') return null;
   const isFetching = landsStatus === 'fetching';
   const isNoData   = landsStatus === 'no-data';
@@ -96,8 +105,31 @@ function LoadingBanner({ landsStatus, landsError }) {
   );
 }
 
+function formatAge(ts) {
+  if (!ts) return 'an earlier session';
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 2) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
+// 17Lands asks tools built on its data to credit it visibly, with a link.
+function DataCredit({ setCode, fetchedAt }) {
+  const url = `https://www.17lands.com/card_data?expansion=${encodeURIComponent(setCode ?? '')}&format=PremierDraft`;
+  return (
+    <span
+      onClick={() => window.electronAPI?.openUrl(url)}
+      title={`Card stats from 17Lands (Premier Draft), downloaded ${fetchedAt ? new Date(fetchedAt).toLocaleString() : '—'}. Click to open 17lands.com`}
+      style={{ fontSize: 9, color: '#7a8a9a', cursor: 'pointer', marginLeft: 8, whiteSpace: 'nowrap' }}>
+      data: 17Lands{fetchedAt ? ` · ${formatAge(fetchedAt)}` : ''}
+    </span>
+  );
+}
+
 // ── "Pack" section header + card count (Section 6B / 6C) ──────────────────────
-function PackSectionHeader({ cardCount, expectedCount, mismatch }) {
+function PackSectionHeader({ cardCount, expectedCount, mismatch, setCode, fetchedAt }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center',
@@ -112,6 +144,7 @@ function PackSectionHeader({ cardCount, expectedCount, mismatch }) {
       }}>
         Pack
       </span>
+      <DataCredit setCode={setCode} fetchedAt={fetchedAt} />
       <span style={{ flex: 1 }} />
       <span title={mismatch ? `Expected ${expectedCount} cards for this pick — got ${cardCount}` : undefined}
             style={{
@@ -148,13 +181,13 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
   const compact = display.compactMode ?? false;
 
   const { inDraft, enrichedPack, pickedCards, landsStatus, landsError, packId,
-          packEventId, pickNumber, packNumber } = draftState;
+          packEventId, pickNumber, packNumber, packSize, setCode,
+          landsStale, landsStaleReason, landsFetchedAt } = draftState;
 
-  // Section 6C, step 4: enforce the expected card count for this pick number.
-  // A standard Arena pack has 15 cards minus the pick number (so pick 0 → 15,
-  // pick 1 → 14, ...). If we ever receive more cards than that for the current
-  // pick, that's the ghost-card bug. Truncate and log.
-  const expectedCount = Math.max(1, 15 - (pickNumber ?? 0));
+  // Enforce the expected card count for this pick: pack size (learned from the
+  // log — 14 for current boosters) minus picks already made from this pack.
+  // More cards than that means a ghost card; truncate and log.
+  const expectedCount = Math.max(1, (packSize ?? 14) - (pickNumber ?? 0));
   const rawCards = enrichedPack ?? [];
   const overflow = rawCards.length > expectedCount;
   if (overflow) {
@@ -190,7 +223,8 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <LoadingBanner landsStatus={landsStatus} landsError={landsError} />
+      <LoadingBanner landsStatus={landsStatus} landsError={landsError} landsStale={landsStale}
+                     landsStaleReason={landsStaleReason} landsFetchedAt={landsFetchedAt} />
 
       {/* ── TOP SECTION — "Pack": pure data view, no recommendations here ── */}
       {cards.length > 0 && (
@@ -198,6 +232,8 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
           cardCount={cards.length}
           expectedCount={expectedCount}
           mismatch={overflow}
+          setCode={setCode}
+          fetchedAt={landsFetchedAt}
         />
       )}
       {cards.length > 0 && <ColHeaders columns={columns} compact={compact} />}
@@ -210,7 +246,9 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
         ) : (
           cards.map((card, i) => (
             <CardRow
-              key={`${packEventId ?? packId ?? 0}-${card.grpId ?? i}`}
+              // Position is part of the key: packs can hold two copies of a
+              // card, and duplicate keys made React leave ghost rows behind.
+              key={`${packEventId ?? packId ?? 0}-${i}-${card.grpId}`}
               card={card}
               columns={columns}
               compact={compact}

@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { StringDecoder } = require('string_decoder');
 const chokidar = require('chokidar');
 const settings = require('./settings');
 const logParser = require('./logParser');
@@ -30,6 +31,10 @@ let lastForceReread = 0; // timestamp of last stale-check forward-read
 
 let lineBuffer = [];
 let flushTimer = null;
+// Arena can flush half a line at a time; hold the unterminated tail until the
+// next read so a JSON body is never split into two unparseable fragments.
+let partialLine = '';
+let decoder = new StringDecoder('utf8');
 
 function scheduleFlush() {
   if (flushTimer) return;
@@ -60,6 +65,17 @@ function processLines(lines) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Split a freshly read chunk into complete lines. `carry` is the unterminated
+ * tail of the previous chunk; the new unterminated tail is returned as `carry`.
+ * Handles CRLF (Player.log's native line ending) and a CRLF split across reads.
+ */
+function splitLogChunk(carry, chunk) {
+  const lines = (carry + chunk).split(/\r?\n/);
+  const rest = lines.pop() ?? '';
+  return { lines, carry: rest };
+}
+
 function resolvedLogPath() {
   const s = settings.get();
   return settings.resolveArenaLogPath(s.general.arenaLogPath);
@@ -86,23 +102,30 @@ const PACK_RESPONSE_MARKERS = [
 ];
 
 function isPackResponseLine(line) {
+  // Human drafts (Premier / Traditional) deliver packs on bare Draft.Notify lines.
+  if (/Draft\.Notify\s+\{/.test(line)) return true;
   return line.startsWith('<==') && PACK_RESPONSE_MARKERS.some(m => line.includes(m));
 }
 
 function initialScan(filePath) {
-  let content;
-  let stat;
+  let raw;
   try {
-    content = fs.readFileSync(filePath, 'utf-8');
-    stat = fs.statSync(filePath);
+    raw = fs.readFileSync(filePath);
   } catch (err) {
     appLogger.log('logWatcher', 'error', 'Cannot read log for initial scan', err.message);
     console.error('[logWatcher] Cannot read log for initial scan:', err.message);
     return;
   }
+  // Size of exactly what we read — a separate stat() could include bytes
+  // Arena wrote in between, which would then never be parsed.
+  lastSize = raw.length;
+  decoder = new StringDecoder('utf8');
 
-  const lines = content.split('\n');
-  console.log(`[logWatcher] Initial scan: ${lines.length} lines, ${stat.size} bytes`);
+  // Player.log uses CRLF line endings — split on both so no line keeps a '\r'.
+  // An unterminated last line (Arena mid-write) is held until the rest arrives.
+  const { lines, carry } = splitLogChunk('', decoder.write(raw));
+  partialLine = carry;
+  console.log(`[logWatcher] Initial scan: ${lines.length} lines, ${raw.length} bytes`);
 
   // Walk backwards to find the last DraftStatus *response* line (<==).
   // Searching for responses (not requests) ensures we start at the most recent
@@ -115,8 +138,6 @@ function initialScan(filePath) {
     }
   }
 
-  lastSize = stat.size;
-
   if (latestPackLine === -1) {
     console.log('[logWatcher] No draft pack events found in log during initial scan');
     return;
@@ -127,6 +148,16 @@ function initialScan(filePath) {
   console.log(`[logWatcher] Latest pack response at line ${latestPackLine}, parsing from line ${startLine}`);
 
   logParser.reset();
+
+  // Human-draft packs don't name their set; replay the EventJoin that started
+  // this draft first so a mid-draft restart still knows which set it is.
+  for (let i = startLine - 1; i >= 0; i--) {
+    if (/==>\s*Event_?Join\b/.test(lines[i]) && lines[i].includes('Draft')) {
+      if (broadcastFn) logParser.parseLine(lines[i], broadcastFn);
+      break;
+    }
+  }
+
   if (broadcastFn) {
     for (let i = startLine; i < lines.length; i++) {
       const line = lines[i];
@@ -170,8 +201,9 @@ function readNewContent(filePath) {
     appLogger.log('logWatcher', 'debug', `Read ${bufLen} new bytes`);
     emitLogUpdated();
 
-    const newContent = buf.toString('utf-8');
-    const newLines = newContent.split('\n');
+    // StringDecoder keeps a multi-byte character split across reads intact.
+    const { lines: newLines, carry } = splitLogChunk(partialLine, decoder.write(buf));
+    partialLine = carry;
 
     // Use burst buffer for rapid writes
     lineBuffer.push(...newLines);
@@ -223,6 +255,9 @@ function startWatching(broadcast) {
 
   logPath = resolvedLogPath();
   lastSize = 0;
+  partialLine = '';
+  decoder = new StringDecoder('utf8');
+  lineBuffer = [];
   lastActivityTime = Date.now();
   lastStaleWarned = false;
   stats = { linesParsed: 0, eventsDetected: 0, parseFailures: 0 };
@@ -313,4 +348,5 @@ function incrementFailureCount() {
 module.exports = {
   startWatching, stopWatching, isRunning, getStats,
   incrementEventCount, incrementFailureCount,
+  splitLogChunk,
 };

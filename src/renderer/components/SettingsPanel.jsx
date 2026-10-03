@@ -131,6 +131,7 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           ['gihwr', 'GIH Win Rate', 'Win rate when card is in opening hand or drawn'],
           ['ohwr',  'Opening Hand Win Rate', 'Win rate when card is in opening hand'],
           ['gpwr',  'Game in Pack Win Rate', 'Overall win rate when in deck'],
+          ['ata',   'Avg Taken At (ATA)', 'How early 17Lands drafters take the card'],
           ['alsa',  'Avg Last Seen At (ALSA)', 'Average pick position when last seen'],
           ['iwd',   'Improvement When Drawn', 'Win rate boost when drawn vs not'],
         ].map(([key, label, desc]) => (

@@ -3,6 +3,9 @@ const path = require('path');
 
 let tray = null;
 let statusText = 'Watching for Arena...';
+let actions = {};        // { toggleLock, showOverlay, hideOverlay, onVisibilityChanged }
+let overlayLocked = true;
+let windows = { overlay: null, control: null };
 
 function createTrayIcon() {
   const iconPath = path.join(app.getAppPath(), 'assets', 'tray-icon.png');
@@ -25,7 +28,9 @@ function createTrayIcon() {
   return icon;
 }
 
-function create(overlayWindow, controlWindow) {
+function create(overlayWindow, controlWindow, opts = {}) {
+  actions = opts;
+  windows = { overlay: overlayWindow, control: controlWindow };
   const icon = createTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip('Arena Overlay');
@@ -44,6 +49,12 @@ function create(overlayWindow, controlWindow) {
   });
 
   return tray;
+}
+
+/** Keep the Lock/Unlock menu label in sync with the overlay. */
+function setLocked(locked) {
+  overlayLocked = locked;
+  if (tray) updateMenu(windows.overlay, windows.control);
 }
 
 function updateStatus(text, overlayWindow, controlWindow) {
@@ -73,13 +84,16 @@ function updateMenu(overlayWindow, controlWindow) {
       label: 'Show / Hide Overlay',
       click: () => {
         if (overlayWindow && !overlayWindow.isDestroyed()) {
-          if (overlayWindow.isVisible()) {
-            overlayWindow.hide();
-          } else {
-            overlayWindow.show();
-          }
+          const nowVisible = !overlayWindow.isVisible();
+          if (nowVisible) (actions.showOverlay ?? (() => overlayWindow.showInactive()))();
+          else (actions.hideOverlay ?? (() => overlayWindow.hide()))();
+          actions.onVisibilityChanged?.(nowVisible);
         }
       },
+    },
+    {
+      label: overlayLocked ? 'Unlock Overlay (move / resize)' : 'Lock Overlay (click-through)',
+      click: () => actions.toggleLock?.(),
     },
     { type: 'separator' },
     {
@@ -114,4 +128,4 @@ function destroy() {
   }
 }
 
-module.exports = { create, updateStatus, updateMenu, destroy };
+module.exports = { create, updateStatus, updateMenu, setLocked, destroy };

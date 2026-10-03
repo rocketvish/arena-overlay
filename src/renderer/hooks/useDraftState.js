@@ -1,12 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   loadSetData,
-  loadColorPairData,
   matchCards,
   getMissingIds,
   cacheArenaIds,
   clearSetData,
 } from '../utils/cardMatcher';
+
+const DEFAULT_PACK_SIZE = 14; // current Arena boosters; replaced by the size seen in the log
+
+// Remove ONE copy of a card — a pack can contain duplicates, and picking one
+// copy must leave the other on screen.
+function withoutOne(cards, grpId) {
+  const i = cards.findIndex((c) => c.grpId === grpId);
+  return i < 0 ? cards : [...cards.slice(0, i), ...cards.slice(i + 1)];
+}
 
 const INITIAL_STATE = {
   inDraft: false,
@@ -15,68 +23,92 @@ const INITIAL_STATE = {
   format: 'PremierDraft',
   packNumber: 0,
   pickNumber: 0,
-  totalPicks: 45, // 3 packs × 15 cards
+  packSize: DEFAULT_PACK_SIZE,
+  totalPicks: DEFAULT_PACK_SIZE * 3,
   currentPack: [],   // raw cards waiting for enrichment
   enrichedPack: [],  // cards with 17Lands stats
   pickedCards: [],   // accumulated picks with stats
-  landsStatus: null, // 'fetching' | 'loaded' | 'error'
+  landsStatus: null, // 'fetching' | 'loaded' | 'no-data' | 'error'
   landsError: null,
-  recommendation: null, // { primary, secondary, explanation, colors }
+  landsFetchedAt: null,  // when the 17Lands snapshot in use was downloaded
+  landsStale: false,     // true when showing an older snapshot (offline / set no longer live)
+  landsStaleReason: null,
+  recommendation: null,
   packId: 0,         // incremented each pack; forces React key reset
-  packEventId: null, // Section 6C: unique id from the parser per pack-opened event
+  packEventId: null, // unique id from the parser per pack-opened event
 };
 
-export function useDraftState(settings) {
+export function useDraftState() {
   const [draftState, setDraftState] = useState(INITIAL_STATE);
-  // Keep a ref to current pack so we can re-enrich when 17Lands data arrives
+  // Latest pack, kept so we can re-enrich when 17Lands data arrives
   const pendingPack = useRef(null);
   const currentSetCode = useRef(null);
-  const currentFormat = useRef('PremierDraft');
   // Track landsStatus synchronously so onPackOpened can see it without stale closure
   const landsStatusRef = useRef(null);
-  // Version counter: incremented on every new pack; async callbacks capture and check it to
-  // discard results that belong to a previous pack (prevents phantom cards from stale callbacks)
+  const landsFetchedAtRef = useRef(null);
+  // Incremented on every new pack; async callbacks compare against it so a
+  // late Scryfall answer can't paint names onto a newer pack.
   const packVersion = useRef(0);
-  // Section 6C: track the last successfully-displayed pack event ID. Any
-  // pack-opened event with a matching ID is a duplicate from the parser
-  // (e.g. log re-read on stale-detection) and is silently dropped.
+  // Last displayed pack event ID — a repeat is a duplicate broadcast.
   const lastPackEventId = useRef(null);
 
-  // ── Enrichment helper ──────────────────────────────────────────────────────
-  const enrich = useCallback(
-    (cards, setCode, format, colorPair) => {
-      if (!cards || cards.length === 0) return [];
-      return matchCards(cards, setCode, format, colorPair);
-    },
-    []
-  );
+  const enrich = useCallback((cards, setCode) => {
+    if (!cards || cards.length === 0) return [];
+    return matchCards(cards, setCode);
+  }, []);
 
-  // Fetch 17Lands data for a set and load it into the matcher
-  const fetchLandsData = useCallback(async (setCode, format) => {
+  // Name any pack cards 17Lands doesn't list (basic lands, bonus cards) via
+  // Scryfall. Skipped while 17Lands is still loading — it will name most cards.
+  const resolveMissingNames = useCallback((setCode) => {
+    const cards = pendingPack.current;
+    if (!cards || !window.electronAPI || landsStatusRef.current === 'fetching') return;
+    const missingIds = getMissingIds(cards, setCode);
+    if (missingIds.length === 0) return;
+    const myVersion = packVersion.current;
+    window.electronAPI.resolveArenaIds(missingIds).then((idMap) => {
+      if (packVersion.current !== myVersion) return; // a newer pack is showing
+      if (idMap && Object.keys(idMap).length > 0) {
+        cacheArenaIds(idMap);
+        setDraftState((prev) => ({ ...prev, enrichedPack: Object.freeze(enrich(pendingPack.current, setCode)) }));
+      }
+    });
+  }, [enrich]);
+
+  // Fetch 17Lands data for a set (main process serves it from cache when fresh)
+  // quiet: reload without flashing the "Loading…" banner (data is already cached in main).
+  const fetchLandsData = useCallback(async (setCode, { quiet = false } = {}) => {
     if (!window.electronAPI || !setCode) return;
 
-    landsStatusRef.current = 'fetching';
-    setDraftState((prev) => ({ ...prev, landsStatus: 'fetching', landsError: null }));
+    if (!quiet) {
+      landsStatusRef.current = 'fetching';
+      setDraftState((prev) => ({ ...prev, landsStatus: 'fetching', landsError: null }));
+    }
 
     try {
-      const result = await window.electronAPI.fetchSetData(setCode, format);
+      const result = await window.electronAPI.fetchSetData(setCode, 'PremierDraft');
+      if (currentSetCode.current && currentSetCode.current !== setCode) return; // a newer draft took over
       if (result?.data) {
-        loadSetData(setCode, format, result.data);
+        loadSetData(setCode, result.data);
         landsStatusRef.current = 'loaded';
-        // Always re-enrich pendingPack.current — it's always the latest pack.
-        // No version guard here: the version guard is only for Scryfall callbacks
-        // where the data is pack-specific. 17Lands data is set-wide and always
-        // correct to apply to whatever pack is current.
+        landsFetchedAtRef.current = result.fetchedAt ?? null;
+        // 17Lands data is set-wide, so it's always right to apply it to the
+        // current pack, whichever one that is.
         setDraftState((prev) => ({
           ...prev,
           landsStatus: 'loaded',
+          landsError: null,
+          landsFetchedAt: result.fetchedAt ?? null,
+          landsStale: !!result.stale,
+          landsStaleReason: result.staleReason ?? null,
           enrichedPack: pendingPack.current
-            ? [...enrich(pendingPack.current, setCode, format, prev.display?.colorFilter ?? 'all')]
+            ? Object.freeze(enrich(pendingPack.current, setCode))
             : prev.enrichedPack,
         }));
+        resolveMissingNames(setCode);
       } else if (result?.noData) {
         landsStatusRef.current = 'no-data';
         setDraftState((prev) => ({ ...prev, landsStatus: 'no-data', landsError: null }));
+        resolveMissingNames(setCode);
       } else {
         landsStatusRef.current = 'error';
         setDraftState((prev) => ({
@@ -87,185 +119,89 @@ export function useDraftState(settings) {
       }
     } catch (err) {
       landsStatusRef.current = 'error';
-      setDraftState((prev) => ({
-        ...prev,
-        landsStatus: 'error',
-        landsError: err.message,
-      }));
+      setDraftState((prev) => ({ ...prev, landsStatus: 'error', landsError: err.message }));
     }
-  }, [enrich]);
-
-  // Re-enrich current pack when color filter changes
-  const reEnrichWithColorPair = useCallback(
-    async (colorPair) => {
-      const setCode = currentSetCode.current;
-      const format = currentFormat.current;
-      if (!setCode || !pendingPack.current) return;
-
-      // Try to load color pair data if not already loaded (fire-and-forget, cached)
-      if (colorPair && colorPair !== 'all' && window.electronAPI) {
-        window.electronAPI.fetchColorPairData(setCode, format, colorPair).then((result) => {
-          if (result?.data) {
-            loadColorPairData(setCode, format, colorPair, result.data);
-            setDraftState((prev) => ({
-              ...prev,
-              enrichedPack: enrich(pendingPack.current, setCode, format, colorPair),
-            }));
-          }
-        });
-      }
-
-      setDraftState((prev) => ({
-        ...prev,
-        enrichedPack: enrich(pendingPack.current, setCode, format, colorPair),
-      }));
-    },
-    [enrich]
-  );
+    if (landsStatusRef.current === 'error') resolveMissingNames(setCode);
+  }, [enrich, resolveMissingNames]);
 
   // ── IPC event listeners ────────────────────────────────────────────────────
   useEffect(() => {
     if (!window.electronAPI) return;
 
-    const format = settings?.general?.draftFormat ?? 'PremierDraft';
-
     const unsubs = [
-      window.electronAPI.onDraftStarted(({ setCode, format: detectedFormat }) => {
-        // Prefer format detected from the Arena log EventName (e.g. QuickDraft for FDN)
-        // over the user's settings default, since the log tells us exactly which event is running.
-        const fmt = detectedFormat ?? format;
+      window.electronAPI.onDraftStarted(({ setCode, format }) => {
         currentSetCode.current = setCode;
-        currentFormat.current = fmt;
         pendingPack.current = null;
         landsStatusRef.current = null;
+        landsFetchedAtRef.current = null;
+        lastPackEventId.current = null;
         clearSetData(setCode);
 
-        console.log(`[useDraftState] draft-started setCode=${setCode} format=${fmt} (detected=${detectedFormat ?? 'none'} setting=${format})`);
+        console.log(`[useDraftState] draft-started setCode=${setCode} format=${format ?? 'unknown'}`);
 
         setDraftState({
           ...INITIAL_STATE,
           inDraft: true,
           setCode,
-          format: fmt,
+          format: format ?? 'PremierDraft',
         });
 
-        // Kick off 17Lands fetch using the correct format
-        if (setCode) fetchLandsData(setCode, fmt);
+        if (setCode) fetchLandsData(setCode);
       }),
 
-      window.electronAPI.onPackOpened(async ({ packEventId, packNumber, pickNumber, cards, setCode, format: detectedFormat }) => {
-        // ── Section 6C, step 2: dedupe by packEventId ─────────────────────────
-        // Reject any pack-opened event whose ID matches the currently displayed
-        // pack. The parser produces a fresh ID per emit (timestamped), so any
-        // collision means we're seeing the same event a second time.
+      window.electronAPI.onPackOpened(({ packEventId, packNumber, pickNumber, packSize, cards, setCode, format }) => {
         if (packEventId && packEventId === lastPackEventId.current) {
           console.log(`[useDraftState] Duplicate packEventId rejected: ${packEventId}`);
           return;
         }
 
         const sc = setCode || currentSetCode.current;
-        // Use format detected from the log if available (more reliable than user setting)
-        const fmt = detectedFormat ?? currentFormat.current;
-        if (detectedFormat && detectedFormat !== currentFormat.current) {
-          currentFormat.current = detectedFormat;
+        // If we never saw draft-started (overlay opened mid-draft), load data
+        // now; and retry after an earlier failure (main rate-limits retries).
+        if (sc && sc !== currentSetCode.current) {
+          currentSetCode.current = sc;
+          fetchLandsData(sc);
+        } else if (sc && (landsStatusRef.current === 'error' || landsStatusRef.current === 'no-data')) {
+          fetchLandsData(sc, { quiet: true });
         }
-        const colorPair = settings?.display?.colorFilter ?? 'all';
 
-        // ── Section 6C, step 3: REPLACE — never append. Freeze the new array
-        // so any later code that tries to mutate it throws (in strict mode)
-        // or silently no-ops (in sloppy mode), making accidental appends loud.
+        // Replace — never append — the pack. Frozen so accidental mutation is loud.
         const frozenIncoming = Object.freeze(cards.map(c => Object.freeze({ ...c })));
 
-        // ── PACK REPLACED logging ────────────────────────────────────────────
-        const oldNames = (pendingPack.current ?? []).map((c) => c.name ?? `#${c.grpId}`);
-        const newNames = frozenIncoming.map((c) => c.name ?? `#${c.grpId}`);
-        console.log(`[PACK REPLACED] eventId=${packEventId} old=[${oldNames.join(', ')}] new=[${newNames.join(', ')}]`);
-
-        // ── Bump version — stale async callbacks will see a mismatch and bail ─
         packVersion.current += 1;
-        const myVersion = packVersion.current;
         lastPackEventId.current = packEventId ?? null;
+        pendingPack.current = frozenIncoming;
 
-        // ── Nuclear clear then set ────────────────────────────────────────────
-        pendingPack.current = null;           // clear before assigning new pack
-        pendingPack.current = frozenIncoming;  // frozen, replace-only
-        if (sc) currentSetCode.current = sc;
-
-        // ── Validate new pack ─────────────────────────────────────────────────
-        const expectedCount = 15 - pickNumber;
-        if (cards.length !== expectedCount) {
-          console.warn(`[useDraftState] Pack size unexpected: got ${cards.length}, expected ${expectedCount} (pack ${packNumber + 1}, pick ${pickNumber})`);
-        }
-        const idSet = new Set(cards.map((c) => c.grpId));
-        if (idSet.size !== cards.length) {
-          console.warn(`[useDraftState] Duplicate card IDs in new pack:`, cards.map((c) => c.grpId));
+        const size = packSize ?? DEFAULT_PACK_SIZE;
+        if (cards.length !== size - pickNumber) {
+          console.warn(`[useDraftState] Pack size unexpected: got ${cards.length}, expected ${size - pickNumber} (pack ${packNumber + 1}, pick ${pickNumber + 1})`);
         }
 
-        // ── Scryfall fallback (version-guarded) ───────────────────────────────
-        // Only call Scryfall when 17Lands won't resolve the names itself.
-        // If 17Lands is fetching, skip — re-enrichment runs when it loads.
-        // If 17Lands has no data or errored, try Scryfall as a fallback.
-        const ls = landsStatusRef.current;
-        const missingIds = (ls === 'no-data' || ls === 'error' || ls === null)
-          ? getMissingIds(cards, sc, fmt)
-          : [];
-        if (missingIds.length > 0 && window.electronAPI) {
-          window.electronAPI.resolveArenaIds(missingIds).then((idMap) => {
-            if (packVersion.current !== myVersion) {
-              console.log(`[useDraftState] Scryfall result discarded — stale pack (v${myVersion}, current v${packVersion.current})`);
-              return;
-            }
-            if (idMap && Object.keys(idMap).length > 0) {
-              cacheArenaIds(idMap);
-              // Re-enrich with the now-resolved names
-              setDraftState((prev) => ({
-                ...prev,
-                enrichedPack: [...enrich(pendingPack.current, sc, fmt, colorPair)],
-              }));
-            }
-          });
-        }
+        resolveMissingNames(sc);
 
-        const enriched = enrich(cards, sc, fmt, colorPair);
+        const enriched = enrich(cards, sc);
 
-        // Sanity check: enriched pack must match the raw pack 1-to-1
-        if (enriched.length !== cards.length) {
-          console.warn(
-            `[useDraftState] enrichedPack length mismatch: raw=${cards.length} enriched=${enriched.length}`,
-            'raw:', cards.map(c => c.grpId),
-            'enriched:', enriched.map(c => c.grpId),
-          );
-        }
-
-        setDraftState((prev) => {
-          // Validate: check for IDs from the old pack leaking into the new one
-          const oldIds = new Set((prev.currentPack ?? []).map((c) => c.grpId));
-          const leaked = cards.filter((c) => oldIds.has(c.grpId) && (prev.currentPack ?? []).length > 0);
-          if (leaked.length > 0 && leaked.length < cards.length) {
-            // Some overlap is expected between packs (foils/reprints), only warn if unusual
-            console.warn(`[useDraftState] ${leaked.length} card IDs appear in both old and new pack:`, leaked.map((c) => c.name ?? `#${c.grpId}`));
-          }
-          return {
-            ...prev,
-            inDraft: true,
-            setCode: sc || prev.setCode,
-            packNumber,
-            pickNumber,
-            packId: (prev.packId ?? 0) + 1,  // force React key reset
-            packEventId,                       // Section 6C: track event ID
-            // Frozen, brand-new arrays — never mutated downstream.
-            currentPack: Object.freeze([...cards]),
-            enrichedPack: Object.freeze([...enriched]),
-            recommendation: null,
-          };
-        });
+        setDraftState((prev) => ({
+          ...prev,
+          inDraft: true,
+          setCode: sc || prev.setCode,
+          format: format ?? prev.format,
+          packNumber,
+          pickNumber,
+          packSize: size,
+          totalPicks: size * 3,
+          packId: (prev.packId ?? 0) + 1,  // force React key reset
+          packEventId,
+          currentPack: Object.freeze([...cards]),
+          enrichedPack: Object.freeze([...enriched]),
+          recommendation: null,
+        }));
       }),
 
       window.electronAPI.onCardPicked(({ grpId, pickedCards: rawPicked }) => {
         setDraftState((prev) => {
           // Find the picked card in enrichedPack to preserve its stats
-          const pickedCard =
-            prev.enrichedPack.find((c) => c.grpId === grpId) ?? { grpId };
+          const pickedCard = prev.enrichedPack.find((c) => c.grpId === grpId) ?? { grpId };
 
           const pickedCards = rawPicked
             ? rawPicked.map((p) => {
@@ -274,21 +210,17 @@ export function useDraftState(settings) {
               })
             : [...prev.pickedCards, pickedCard];
 
-          // Remove only the picked card from the visible pack — don't blank the
-          // entire overlay.  The remaining cards stay visible while we wait for
-          // the next pack-opened event, preventing a distracting blank flash.
-          const enrichedPack = prev.enrichedPack.filter((c) => c.grpId !== grpId);
-
+          // Remove only the picked card — the rest stay visible until the
+          // next pack arrives, avoiding a blank flash.
           return {
             ...prev,
-            currentPack: prev.currentPack.filter((c) => c.grpId !== grpId),
-            enrichedPack,
+            currentPack: withoutOne(prev.currentPack, grpId),
+            enrichedPack: withoutOne(prev.enrichedPack, grpId),
             pickedCards,
           };
         });
-        // Update pendingPack ref to match (remove picked card)
         if (pendingPack.current) {
-          pendingPack.current = pendingPack.current.filter((c) => c.grpId !== grpId);
+          pendingPack.current = withoutOne(pendingPack.current, grpId);
         }
       }),
 
@@ -296,10 +228,26 @@ export function useDraftState(settings) {
         setDraftState((prev) => ({ ...prev, inDraft: false, currentPack: [], enrichedPack: [] }));
         pendingPack.current = null;
       }),
+
+      // Newer data downloaded (manual refresh, or another window's fetch):
+      // reload it from the main-process cache and re-apply.
+      window.electronAPI.on17landsStatus((s) => {
+        if (s?.status !== 'loaded' || !s.setCode || s.setCode !== currentSetCode.current) return;
+        if (s.fetchedAt && s.fetchedAt === landsFetchedAtRef.current) return;
+        fetchLandsData(s.setCode, { quiet: true });
+      }),
     ];
 
     return () => unsubs.forEach((fn) => fn && fn());
-  }, [settings, fetchLandsData, enrich]);
+  }, [fetchLandsData, enrich, resolveMissingNames]);
 
-  return { draftState, reEnrichWithColorPair };
+  const refreshLandsData = useCallback(async () => {
+    const sc = currentSetCode.current;
+    if (!sc || !window.electronAPI?.refreshSetData) return;
+    setDraftState((prev) => ({ ...prev, landsStatus: 'fetching' }));
+    await window.electronAPI.refreshSetData(sc);
+    await fetchLandsData(sc);
+  }, [fetchLandsData]);
+
+  return { draftState, refreshLandsData };
 }

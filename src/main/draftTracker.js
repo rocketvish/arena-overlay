@@ -9,6 +9,8 @@ let state = {
   format: null,
   // { meanGihwr: number, qualityFractions: {W,U,B,R,G}, totalCards: number }
   setMetrics: null,
+  // Cards per pack (14 for current Arena boosters), learned from the log.
+  packSize: null,
   // [{ packNumber, pickNumber, cards: [enrichedCard] }]
   packHistory: [],
   // [{ seqNum, packNumber, pickNumber, grpId, name, grade, color, cmc,
@@ -18,7 +20,7 @@ let state = {
 
 function reset() {
   state = {
-    setCode: null, format: null, setMetrics: null,
+    setCode: null, format: null, setMetrics: null, packSize: null,
     packHistory: [], pickHistory: [],
   };
 }
@@ -30,6 +32,10 @@ function setInfo(setCode, format) {
 
 function setSetMetrics(metrics) {
   state.setMetrics = metrics;
+}
+
+function setPackSize(size) {
+  if (size) state.packSize = size;
 }
 
 /**
@@ -57,7 +63,10 @@ function recordPick({ packNumber, pickNumber, grpId, enrichedCard, recommendatio
     grpId,
     name: pickedName,
     grade: enrichedCard?.stats?.grade ?? null,
+    // Full stats so color commitment and deck grade can weight picks by quality.
+    stats: enrichedCard?.stats ?? null,
     color: enrichedCard?.color ?? '',
+    rarity: enrichedCard?.rarity ?? null,
     cmc: enrichedCard?.cmc ?? null,
     typeLine: enrichedCard?.typeLine ?? '',
     oracleText: enrichedCard?.oracleText ?? '',
@@ -70,4 +79,4 @@ function getState() {
   return state;
 }
 
-module.exports = { reset, setInfo, setSetMetrics, recordPackSeen, recordPick, getState };
+module.exports = { reset, setInfo, setSetMetrics, setPackSize, recordPackSeen, recordPick, getState };

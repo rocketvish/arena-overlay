@@ -27,9 +27,15 @@ const appLogger = require('./appLogger');
 // ─── Broadcast helper ────────────────────────────────────────────────────────
 
 let broadcastFn = null;
+// Optional: (grpIds) => setCode | null, for drafts whose set we never saw named.
+let setCodeResolver = null;
 
 function setBroadcast(fn) {
   broadcastFn = fn;
+}
+
+function setSetCodeResolver(fn) {
+  setCodeResolver = fn;
 }
 
 function emit(channel, data) {
@@ -72,9 +78,19 @@ function logParseFailure(line) {
 
 const PATTERNS = {
   packStatus: ['BotDraftDraftStatus', 'HumanDraftDraftStatus', 'Draft/DraftStatus', 'Event/DraftNotify'],
-  pick: ['BotDraftDraftPick', 'HumanDraftDraftPick', 'BotDraftMakePick', 'HumanDraftMakePick', 'Draft/MakePick', 'Ranked/MakePick'],
-  draftComplete: ['Draft/CompleteDraft'],
+  pick: [
+    'BotDraftDraftPick', 'HumanDraftDraftPick', 'BotDraftMakePick', 'HumanDraftMakePick',
+    'Draft/MakePick', 'Ranked/MakePick',
+    // Premier / Traditional (human) drafts
+    'EventPlayerDraftMakePick', 'Event_PlayerDraftMakePick', 'Event.PlayerDraftMakePick',
+  ],
+  draftComplete: ['Draft/CompleteDraft', 'EventCompleteDraft', 'Event_CompleteDraft'],
 };
+
+// Human-draft packs arrive on a bare notify line rather than a <== response:
+//   [UnityCrossThreadLogger]Draft.Notify {"draftId":"…","SelfPick":3,"SelfPack":1,"PackCards":"101,102,…"}
+// SelfPack / SelfPick are 1-based.
+const DRAFT_NOTIFY_RE = /Draft\.Notify\s+(\{.*\})\s*$/;
 
 const ALL_DRAFT_ENDPOINTS = [
   ...PATTERNS.packStatus,
@@ -90,8 +106,12 @@ let state = {
   inDraft: false,
   setCode: null,
   format: null,   // 17Lands format string detected from EventName (e.g. 'QuickDraft')
+  eventName: null,
   packNumber: 0,
   pickNumber: 0,
+  // Cards per pack. Not always 15 — e.g. SOS packs hold 14. Learned from the
+  // first pick of each pack (pickNumber 0 → full pack).
+  packSize: null,
   currentPack: [],
   pickedCards: [],
 };
@@ -149,8 +169,8 @@ const SKIP_RE = /^\[UnityCrossThreadLogger\]|^Mono |^Initialize |^GfxDevice|^Dir
 
 function reset() {
   state = {
-    inDraft: false, setCode: null, format: null,
-    packNumber: 0, pickNumber: 0,
+    inDraft: false, setCode: null, format: null, eventName: null,
+    packNumber: 0, pickNumber: 0, packSize: null,
     currentPack: [], pickedCards: [],
   };
   pendingEndpoint = null;
@@ -159,14 +179,30 @@ function reset() {
   lastEmittedPick = { packNumber: null, pickNumber: null };
 }
 
-function parseLine(line, broadcast) {
+function parseLine(rawLine, broadcast) {
   // Update broadcast if provided
   if (broadcast && typeof broadcast === 'function') {
     broadcastFn = broadcast;
   }
 
+  // Player.log is written with CRLF endings. A trailing '\r' defeats every
+  // `$`-anchored regex below (`.` never matches '\r'), which silently dropped
+  // every ==> request line — including all draft picks.
+  const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
   // Check for parse failures — lines with draft keywords that don't match patterns
   const hasDraftKeyword = DRAFT_KEYWORDS.some(k => line.includes(k));
+
+  // ── Draft.Notify (human drafts: Premier / Traditional) ───────────────────
+  const notifyMatch = line.match(DRAFT_NOTIFY_RE);
+  if (notifyMatch) {
+    flushPending();
+    handleDraftNotify(notifyMatch[1]);
+    incrementEvent();
+    pendingEndpoint = null;
+    pendingBuffer   = '';
+    return;
+  }
 
   // ── ==> request (new format — inline JSON) ───────────────────────────────
   const inlineMatch = line.match(REQ_INLINE_RE);
@@ -177,7 +213,9 @@ function parseLine(line, broadcast) {
     const inlineRaw = inlineMatch[2];
     appLogger.log('parser', 'debug', `==> ${endpoint} (inline JSON)`);
 
-    if (isDraftEndpoint(endpoint)) {
+    if (endpoint === 'EventJoin' || endpoint === 'Event_Join') {
+      handleEventJoin(inlineRaw);
+    } else if (isDraftEndpoint(endpoint)) {
       tryHandleRequest(endpoint, inlineRaw);
       incrementEvent();
     } else if (hasDraftKeyword) {
@@ -265,15 +303,30 @@ function tryHandleRequest(endpoint, raw) {
     try { req = JSON.parse(req); } catch { return; }
   }
 
+  if (PATTERNS.draftComplete.some(p => endpoint.includes(p))) {
+    endDraft(endpoint);
+    return;
+  }
+
   if (isPickEndpoint(endpoint)) {
     const pickInfo = req.PickInfo ?? req.pickInfo;
-    const cardIds = pickInfo?.CardIds ?? pickInfo?.cardIds;
+    const cardIds = pickInfo?.CardIds ?? pickInfo?.cardIds ?? req.GrpIds ?? req.grpIds;
     const grpId = cardIds?.length
       ? parseInt(cardIds[0])
       : parseInt(req.GrpId ?? req.grpId ?? req.CardId ?? req.cardId);
+
+    // Where in the draft this pick was made. Bot drafts send 0-based
+    // PickInfo.PackNumber/PickNumber; human drafts send 1-based Pack/Pick.
+    let pickPack = pickInfo?.PackNumber ?? pickInfo?.packNumber;
+    let pickPick = pickInfo?.PickNumber ?? pickInfo?.pickNumber;
+    if (pickPack == null && (req.Pack ?? req.pack) != null) {
+      pickPack = (req.Pack ?? req.pack) - 1;
+      pickPick = (req.Pick ?? req.pick) - 1;
+    }
+
     if (!isNaN(grpId)) {
-      appLogger.log('parser', 'info', `card-picked via request grpId=${grpId}`);
-      handlePick(grpId);
+      appLogger.log('parser', 'info', `card-picked via request grpId=${grpId} pack=${pickPack} pick=${pickPick}`);
+      handlePick(grpId, toInt(pickPack), toInt(pickPick));
     }
   }
 
@@ -382,6 +435,15 @@ function handleDraftPayload(payload) {
   const { setCode: scFromEvent, format: fmtFromEvent } = extractEventInfo(eventName);
   const setCode = scFromEvent ?? payload.WOTCReleaseId ?? payload.setCode;
 
+  // Bot drafts finish with a pick response whose DraftStatus is "Completed"
+  // and whose DraftPack is empty. Without this the overlay stayed stuck on
+  // the final pack and the next draft in the same session was suppressed as
+  // "stale" by the anti-regression check below.
+  if (draftStatus === 'Completed' || draftStatus === 'Complete') {
+    endDraft(`DraftStatus=${draftStatus}`);
+    return;
+  }
+
   if (!packCards || !Array.isArray(packCards) || packCards.length === 0) {
     appLogger.log('parser', 'debug', `No pack cards in payload (DraftStatus=${draftStatus})`);
     return;
@@ -398,29 +460,129 @@ function handleDraftPayload(payload) {
     return null;
   }).filter(c => c && !isNaN(c.grpId));
 
-  // Validation: log a warning when the pack size seems wrong.
-  // In a normal 3-pack draft the remaining cards = 15 - pickNumber.
-  // This fires when the parser might be processing stale or merged data.
-  if (packNumber != null && pickNumber != null) {
-    const expected = 15 - pickNumber;
-    if (normalizedPack.length !== expected) {
-      appLogger.log('parser', 'warn',
-        `Pack size mismatch: got ${normalizedPack.length} card(s), ` +
-        `expected ${expected} (pack=${packNumber}, pick=${pickNumber})`, {
-          cards: normalizedPack.map(c => c.grpId),
-        });
-      console.warn(`[parser] Pack size mismatch: got ${normalizedPack.length}, expected ${expected} ` +
-        `(pack=${packNumber}, pick=${pickNumber}) cards=${JSON.stringify(normalizedPack.map(c => c.grpId))}`);
-    }
+  applyPack({
+    cards: normalizedPack,
+    packNumber: toInt(packNumber),
+    pickNumber: toInt(pickNumber),
+    eventName,
+    setCode,
+    format: fmtFromEvent,
+  });
+}
+
+function toInt(v) {
+  if (v == null || v === '') return null;
+  const n = parseInt(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * Joining an event names the set and format. Human-draft packs (Draft.Notify)
+ * don't carry an EventName, so this is the only place Premier / Traditional
+ * drafts learn their set code.
+ */
+function handleEventJoin(raw) {
+  let req;
+  try {
+    const outer = JSON.parse(raw);
+    req = typeof outer.request === 'string' ? JSON.parse(outer.request) : (outer.request ?? outer);
+  } catch { return; }
+  const eventName = req?.EventName ?? req?.eventName;
+  if (!eventName || !/Draft/i.test(eventName)) return; // sealed, constructed, etc.
+  const { setCode, format } = extractEventInfo(eventName);
+  if (!setCode) return;
+  appLogger.log('parser', 'info', `EventJoin ${eventName} → set=${setCode} format=${format}`);
+  if (state.inDraft && state.eventName && state.eventName !== eventName) endDraft(`joined ${eventName}`);
+  state.setCode = setCode;
+  state.format = format ?? state.format;
+  state.eventName = eventName;
+}
+
+// Human-draft pack notification (Premier / Traditional). 1-based pack/pick.
+function handleDraftNotify(raw) {
+  let payload;
+  try { payload = JSON.parse(raw); } catch (e) {
+    appLogger.log('parser', 'warn', 'Draft.Notify parse failed', e.message);
+    return;
+  }
+  const cardsRaw = payload.PackCards ?? payload.packCards;
+  const cards = (typeof cardsRaw === 'string' ? cardsRaw.split(',') : (cardsRaw ?? []))
+    .map(id => ({ grpId: parseInt(id) }))
+    .filter(c => !isNaN(c.grpId));
+  if (cards.length === 0) return;
+
+  const pack = toInt(payload.SelfPack ?? payload.selfPack);
+  const pick = toInt(payload.SelfPick ?? payload.selfPick);
+  applyPack({
+    cards,
+    packNumber: pack != null ? pack - 1 : null,
+    pickNumber: pick != null ? pick - 1 : null,
+    eventName: null,
+    setCode: null,
+    format: null,
+  });
+}
+
+function endDraft(reason) {
+  if (!state.inDraft) return;
+  appLogger.log('parser', 'info', `draft-ended (${reason}) setCode=${state.setCode}`);
+  console.log(`[parser] draft-ended (${reason})`);
+  emit('draft-ended', { setCode: state.setCode, format: state.format });
+  state.inDraft = false;
+  state.pickedCards = [];
+  state.currentPack = [];
+  state.packSize = null;
+  lastEmittedPack = { packNumber: null, pickNumber: null };
+  lastEmittedPick = { packNumber: null, pickNumber: null };
+}
+
+function applyPack({ cards: normalizedPack, packNumber, pickNumber, eventName, setCode, format: fmtFromEvent }) {
+  // A different event, or a fresh P1p1 after we'd already moved past it,
+  // means a new draft began without us seeing the previous one finish
+  // (abandoned draft, app started mid-way, etc.). Start over cleanly.
+  const isNewEvent = eventName && state.eventName && eventName !== state.eventName;
+  const isRestartedDraft = packNumber === 0 && pickNumber === 0 &&
+    lastEmittedPack.packNumber !== null &&
+    (lastEmittedPack.packNumber > 0 || lastEmittedPack.pickNumber > 0);
+  if (state.inDraft && (isNewEvent || isRestartedDraft)) {
+    endDraft(isNewEvent ? `new event ${eventName}` : 'new P1p1');
   }
 
   if (setCode) state.setCode = setCode;
   if (fmtFromEvent) state.format = fmtFromEvent;
-  if (packNumber !== undefined && packNumber !== null) state.packNumber = packNumber;
-  if (pickNumber !== undefined && pickNumber !== null) state.pickNumber = pickNumber;
-  // Explicitly clear previous pack before setting new one (prevents any stale-merge bugs)
-  state.currentPack = [];
+  if (eventName) state.eventName = eventName;
+  if (packNumber != null) state.packNumber = packNumber;
+  if (pickNumber != null) state.pickNumber = pickNumber;
+
+  // Learn the pack size from the first pick of a pack (full pack), or infer
+  // it from a later pick if we joined mid-pack.
+  if (pickNumber === 0) state.packSize = normalizedPack.length;
+  else if (state.packSize == null && pickNumber != null) state.packSize = normalizedPack.length + pickNumber;
+
+  if (state.packSize != null && pickNumber != null) {
+    const expected = state.packSize - pickNumber;
+    if (normalizedPack.length !== expected) {
+      appLogger.log('parser', 'warn',
+        `Pack size mismatch: got ${normalizedPack.length} card(s), ` +
+        `expected ${expected} (pack=${packNumber}, pick=${pickNumber}, packSize=${state.packSize})`, {
+          cards: normalizedPack.map(c => c.grpId),
+        });
+    }
+  }
+
   state.currentPack = normalizedPack;
+
+  // Human-draft packs don't name their set. If we missed the EventJoin (Arena
+  // restarted mid-draft), recognise the set from the cards themselves.
+  if (!state.setCode && setCodeResolver) {
+    try {
+      const inferred = setCodeResolver(normalizedPack.map(c => c.grpId));
+      if (inferred) {
+        state.setCode = inferred;
+        appLogger.log('parser', 'info', `Set inferred from card IDs: ${inferred}`);
+      }
+    } catch {}
+  }
 
   if (!state.inDraft) {
     state.inDraft = true;
@@ -469,39 +631,45 @@ function handleDraftPayload(payload) {
     packEventId,
     packNumber:  state.packNumber,
     pickNumber:  state.pickNumber,
+    packSize:    state.packSize,
     cards:       normalizedPack,
     setCode:     state.setCode,
     format:      state.format,
   });
 }
 
-function handlePick(grpId) {
-  state.pickedCards = [...state.pickedCards, { grpId }];
-  state.pickNumber  = (state.pickNumber || 0) + 1;
+/**
+ * Record a pick. packNumber/pickNumber identify the pick that was made
+ * (0-based); when the request didn't carry them we assume it answers the
+ * pack currently on screen.
+ */
+function handlePick(grpId, packNumber = null, pickNumber = null) {
+  const pack = packNumber ?? state.packNumber ?? 0;
+  const pick = pickNumber ?? state.pickNumber ?? 0;
 
   // Deduplicate: only emit if this pick is strictly newer than the last one.
-  // Replayed MakePick lines (from initial scan context or stale forward-reads)
-  // must not re-fire card-picked and clear the renderer's current enrichedPack.
+  // Replayed MakePick lines (from the initial scan context) must not re-fire
+  // card-picked or append the same card to the pool twice.
   const pickIsNewer =
     lastEmittedPick.packNumber === null ||
-    state.packNumber > lastEmittedPick.packNumber ||
-    (state.packNumber === lastEmittedPick.packNumber &&
-     state.pickNumber > lastEmittedPick.pickNumber);
+    pack > lastEmittedPick.packNumber ||
+    (pack === lastEmittedPick.packNumber && pick > lastEmittedPick.pickNumber);
 
   if (!pickIsNewer) {
     appLogger.log('parser', 'debug',
-      `card-picked suppressed (stale) pack=${state.packNumber} pick=${state.pickNumber} ` +
+      `card-picked suppressed (stale) pack=${pack} pick=${pick} ` +
       `lastPack=${lastEmittedPick.packNumber} lastPick=${lastEmittedPick.pickNumber}`);
     return;
   }
-  lastEmittedPick = { packNumber: state.packNumber, pickNumber: state.pickNumber };
+  lastEmittedPick = { packNumber: pack, pickNumber: pick };
+  state.pickedCards = [...state.pickedCards, { grpId }];
 
-  appLogger.log('parser', 'info', `card-picked grpId=${grpId} pickNumber=${state.pickNumber}`);
-  console.log(`[parser] card-picked grpId=${grpId} pickNumber=${state.pickNumber}`);
+  appLogger.log('parser', 'info', `card-picked grpId=${grpId} pack=${pack} pick=${pick}`);
+  console.log(`[parser] card-picked grpId=${grpId} pack=${pack} pick=${pick}`);
   emit('card-picked', {
     grpId,
-    packNumber:   state.packNumber,
-    pickNumber:   state.pickNumber,
+    packNumber:   pack,
+    pickNumber:   pick,
     pickedCards:  state.pickedCards,
   });
 }
@@ -510,4 +678,4 @@ function getState() {
   return { ...state };
 }
 
-module.exports = { parseLine, reset, getState, setBroadcast, detectFormat };
+module.exports = { parseLine, reset, getState, setBroadcast, setSetCodeResolver, detectFormat };

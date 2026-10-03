@@ -7,7 +7,8 @@ const SET_NAMES = {
   MOM: 'March of the Machine', ONE: 'Phyrexia: All Will Be One',
   BRO: 'The Brothers War', DMU: 'Dominaria United',
   FDN: 'Foundations', TDM: 'Tarkir: Dragonstorm',
-  FIN: 'Final Fantasy', ECL: 'Edge of Eternities',
+  FIN: 'Final Fantasy', EOE: 'Edge of Eternities', ECL: 'Lorwyn Eclipsed',
+  TLA: 'Avatar: The Last Airbender', TMT: 'Teenage Mutant Ninja Turtles',
 };
 
 const FORMAT_SHORT = {
@@ -52,7 +53,7 @@ function LockIcon({ open, color, size = 14 }) {
 }
 
 export default function OverlayHeader({
-  setCode, format, inDraft, packNumber, pickNumber, totalPicks,
+  setCode, format, inDraft, packNumber, pickNumber, totalPicks, packSize = 14, interactHotkey,
   isInteractable, isMinimized, onToggleMinimize, onToggleInteract,
   landsStatus, lastLogUpdate, packCardCount, packCardCountMismatch,
 }) {
@@ -73,6 +74,7 @@ export default function OverlayHeader({
   }, [isInteractable]);
 
   const lockColor = isInteractable ? '#5cc8ff' : '#888';
+  const hotkeyLabel = interactHotkey?.ok ? interactHotkey.key : null;
 
   return (
     <div style={{
@@ -98,7 +100,7 @@ export default function OverlayHeader({
           WebkitAppRegion: 'no-drag',
           animation: pulsing ? 'lockPulse 0.5s ease-in-out 4' : 'none',
         }}
-        title={isInteractable ? 'Unlocked — click to drag/resize' : 'Locked (click-through)'}>
+        title={isInteractable ? 'Unlocked — drag to move, edges to resize' : 'Locked — click-through and fixed in place'}>
           <LockIcon open={isInteractable} color={lockColor} size={14} />
         </div>
 
@@ -128,14 +130,17 @@ export default function OverlayHeader({
         <div style={{ display: 'flex', gap: 3, WebkitAppRegion: 'no-drag', flexShrink: 0 }}>
           {isInteractable && (
             <>
-              <IconBtn onClick={onToggleInteract} title="Lock overlay (Alt+D)">Lock</IconBtn>
+              <IconBtn onClick={onToggleInteract} title={`Lock overlay${hotkeyLabel ? ` (${hotkeyLabel})` : ''}`}>Lock</IconBtn>
               <IconBtn onClick={onToggleMinimize} title={isMinimized ? 'Expand' : 'Collapse'}>
                 {isMinimized ? '▼' : '▲'}
               </IconBtn>
             </>
           )}
           {!isInteractable && (
-            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)' }}>Alt+D</span>
+            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)' }}
+                  title={hotkeyLabel ? `Press ${hotkeyLabel} to unlock` : 'Unlock from the tray icon or the control window'}>
+              {hotkeyLabel ?? 'locked'}
+            </span>
           )}
         </div>
       </div>
@@ -164,7 +169,7 @@ export default function OverlayHeader({
           )}
           {totalPicks > 0 && (
             <span style={{ fontSize: 11, color: '#666', marginLeft: 'auto' }}>
-              {Math.min(packNumber * 15 + pickNumber + 1, totalPicks)}/{totalPicks}
+              {Math.min(packNumber * packSize + pickNumber + 1, totalPicks)}/{totalPicks}
             </span>
           )}
         </div>

@@ -12,8 +12,8 @@ const GRADE_COLORS = {
 };
 
 function signalTrafficColor(score) {
-  if (score >= 70) return '#50c87a';
-  if (score >= 45) return '#c8c830';
+  if (score >= 60) return '#50c87a';
+  if (score >= 40) return '#c8c830';
   return '#d05050';
 }
 
@@ -53,6 +53,42 @@ function ColorSignalsPanel({ colorSignals, hasColorData }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ── Archetype standings: which two-color decks the field wins with ───────────
+function ArchetypeStandingsPanel({ standings, commitment }) {
+  if (!standings || standings.length === 0) return null;
+  const yours = commitment?.colors?.length === 2 ? [...commitment.colors].sort().join('') : null;
+  const cohort = standings[0]?.cohort === 'top' ? "17Lands' top players" : 'all 17Lands players';
+  const maxWr = Math.max(...standings.map(s => s.wr));
+  const minWr = Math.min(...standings.map(s => s.wr));
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <SectionHead title={`What's winning — 2-color win rate (${cohort})`} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {standings.map(s => {
+          const mine = yours && [...s.pair].sort().join('') === yours;
+          const width = maxWr > minWr ? 15 + 85 * (s.wr - minWr) / (maxWr - minWr) : 50;
+          return (
+            <div key={s.pair} style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                 title={`${s.pair}: ${(s.wr * 100).toFixed(1)}% (${s.cohort === 'top' ? 'top players' : 'all players'}); all players ${(s.overallWr * 100).toFixed(1)}%; ${(s.share * 100).toFixed(0)}% of decks`}>
+              <span style={{ width: 26, fontSize: 10, fontWeight: 700, fontFamily: 'monospace' }}>
+                {[...s.pair].map(c => <span key={c} style={{ color: COLOR_HEX[c] }}>{c}</span>)}
+              </span>
+              <div style={{ flex: 1, height: 5, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+                <div style={{ width: `${width}%`, height: '100%', background: mine ? '#7ec8ff' : 'rgba(150,170,200,0.45)' }} />
+              </div>
+              <span style={{ fontSize: 10, color: mine ? '#7ec8ff' : '#999', fontFamily: 'monospace', minWidth: 40, textAlign: 'right' }}>
+                {(s.wr * 100).toFixed(1)}%
+              </span>
+              <span style={{ fontSize: 9, color: '#555', minWidth: 28, textAlign: 'right' }}>{(s.share * 100).toFixed(0)}%</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 9, color: '#555', marginTop: 4 }}>Right column: share of decks drafted. Source: 17Lands.</div>
     </div>
   );
 }
@@ -180,7 +216,7 @@ function PickHistoryPanel({ pickHistory }) {
               borderRadius: 3,
             }}>
               <span style={{ fontSize: 9, color: '#444', width: 22, textAlign: 'right', flexShrink: 0, fontFamily: 'monospace' }}>
-                P{Math.floor(pick.seqNum / 15) + 1}.{((pick.seqNum - 1) % 15) + 1}
+                P{(pick.packNumber ?? 0) + 1}.{(pick.pickNumber ?? 0) + 1}
               </span>
               {pick.grade && (
                 <span style={{ fontSize: 9, color: gradeColor, width: 18, textAlign: 'center', flexShrink: 0, fontWeight: 700 }}>
@@ -229,11 +265,13 @@ export default function AssistantPanel({ assistantState, draftState }) {
   const {
     colorSignals, hasColorData, deckComposition, deckNeeds, strengths, weaknesses,
     manaAnalysis, pickHistory, archetype, winConditions, deckGrade,
+    archetypeStandings, commitment,
   } = assistantState;
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}>
       <ColorSignalsPanel colorSignals={colorSignals} hasColorData={hasColorData} />
+      <ArchetypeStandingsPanel standings={archetypeStandings} commitment={commitment} />
       <ArchetypeWinPanel archetype={archetype} winConditions={winConditions} deckGrade={deckGrade} />
       <DeckOverviewPanel composition={deckComposition} manaAnalysis={manaAnalysis} />
       <AssessmentPanel strengths={strengths} weaknesses={weaknesses} deckNeeds={deckNeeds} />

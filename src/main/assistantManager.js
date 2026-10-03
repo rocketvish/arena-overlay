@@ -12,7 +12,8 @@ const appLogger      = require('./appLogger');
 let broadcastFn  = null;
 let currentState = null;
 let pendingPackCards = null; // enriched cards for the current pack (for recommendation)
-let lastHandledPackEventId = null; // Section 6C: dedupe by parser-stamped event ID
+let currentPosition = { packNumber: 0, pickNumber: 0, packSize: null };
+let lastHandledPackEventId = null; // dedupe by parser-stamped event ID
 
 function isEnabled() {
   return settings.get().assistant?.enabled !== false;
@@ -35,80 +36,96 @@ function broadcast(state) {
   if (broadcastFn) broadcastFn('assistant-update', state);
 }
 
-/**
- * Enrich a list of raw pack cards using 17Lands data + Scryfall type cache.
- * Returns enriched cards with stats attached (no stats = empty stats).
- */
-async function enrichCards(rawCards, setCode, format) {
-  if (!rawCards || rawCards.length === 0) return [];
+function enrichOne(grpId, landsMap) {
+  const lands = landsMap.get(grpId) ?? null;
+  const scryfall = landsData.getScryfallCardData(grpId) ?? {};
+  return {
+    grpId,
+    name:       lands?.name ?? scryfall.name ?? `#${grpId}`,
+    color:      lands?.color ?? scryfall.colorIdentity ?? '',
+    rarity:     lands?.rarity ?? scryfall.rarity ?? 'common',
+    cmc:        lands?.cmc ?? scryfall.cmc ?? null,
+    typeLine:   lands?.typeLine || scryfall.typeLine || '',
+    oracleText: lands?.oracleText || scryfall.oracleText || '',
+    stats:      lands?.stats ?? null,
+  };
+}
 
-  let landsMap = new Map();
+async function loadLandsMap(setCode) {
+  const map = new Map();
+  if (!setCode) return map;
   try {
-    const result = await landsData.fetchSetData(setCode, format);
-    if (result?.data) {
-      for (const card of result.data) {
-        if (card.mtgaId != null) landsMap.set(card.mtgaId, card);
-      }
+    const result = await landsData.fetchSetData(setCode);
+    for (const card of result?.data ?? []) {
+      if (card.mtgaId != null) map.set(card.mtgaId, card);
     }
   } catch (e) {
     appLogger.log('assistant', 'warn', 'Failed to load set data for enrichment', e.message);
   }
-
-  return rawCards.map(c => {
-    const lands = landsMap.get(c.grpId) ?? null;
-    const scryfall = landsData.getScryfallCardData(c.grpId) ?? {};
-    return {
-      grpId:     c.grpId,
-      name:      lands?.name ?? scryfall.name ?? c.name ?? `#${c.grpId}`,
-      color:     lands?.color ?? scryfall.colorIdentity ?? '',
-      rarity:    lands?.rarity ?? scryfall.rarity ?? 'common',
-      cmc:       lands?.cmc ?? scryfall.cmc ?? null,
-      typeLine:  scryfall.typeLine  ?? '',
-      oracleText: scryfall.oracleText ?? '',
-      stats:     lands?.stats ?? null,
-    };
-  });
+  return map;
 }
+
+/** Card stats + archetype win rates → set metrics for the analyzer. */
+async function loadSetMetrics(setCode) {
+  const [cards, ratings] = await Promise.all([
+    landsData.fetchSetData(setCode).then(r => r?.data ?? null),
+    landsData.fetchColorRatings(setCode).catch(() => null),
+  ]);
+  if (!cards) return null;
+  return signalAnalyzer.computeSetMetrics(cards, ratings);
+}
+
+function reanalyze(packCards) {
+  const state = signalAnalyzer.analyze(
+    draftTracker.getState(), packCards, currentPosition, getAssistantSettings());
+  broadcast(state);
+}
+
+// Events are processed strictly in arrival order. Handlers await data loads,
+// and a burst of events (e.g. the initial log scan) must not interleave —
+// otherwise a pick could be recorded before the pack it came from.
+let queue = Promise.resolve();
 
 /**
  * Handle an event from the log pipeline.
  * Called by the wrapped broadcastToAll in main.js.
  */
-async function handleEvent(channel, data) {
-  if (!isEnabled()) return;
+function handleEvent(channel, data) {
+  const run = queue.then(() => processEvent(channel, data));
+  queue = run.catch((e) => appLogger.log('assistant', 'error', `handleEvent ${channel} failed`, e.message));
+  return run;
+}
 
-  const assistantSettings = getAssistantSettings();
+async function processEvent(channel, data) {
+  if (!isEnabled()) return;
 
   if (channel === 'draft-started') {
     draftTracker.reset();
     draftTracker.setInfo(data.setCode, data.format);
     pendingPackCards = null;
     lastHandledPackEventId = null;
+    currentPosition = { packNumber: 0, pickNumber: 0, packSize: null };
+    broadcast(signalAnalyzer.emptyState());
 
-    // Load set metrics asynchronously for signal quality baseline
-    const { setCode, format } = data;
-    if (setCode && format) {
-      landsData.fetchSetData(setCode, format).then(result => {
-        if (result?.data) {
-          const metrics = signalAnalyzer.computeSetMetrics(result.data);
-          draftTracker.setSetMetrics(metrics);
-          appLogger.log('assistant', 'info', `Set metrics loaded for ${setCode}:${format}`);
-          // Re-analyze with updated metrics
-          const state = signalAnalyzer.analyze(draftTracker.getState(), pendingPackCards, 0, assistantSettings);
-          broadcast(state);
-        }
+    const { setCode } = data;
+    if (setCode) {
+      loadSetMetrics(setCode).then(metrics => {
+        // Ignore if a different draft has started meanwhile.
+        if (!metrics || draftTracker.getState().setCode !== setCode) return;
+        draftTracker.setSetMetrics(metrics);
+        appLogger.log('assistant', 'info', `Set metrics loaded for ${setCode}`, {
+          pairs: metrics.pairs ? Object.keys(metrics.pairs).length : 0,
+        });
+        reanalyze(pendingPackCards);
       }).catch(e => appLogger.log('assistant', 'warn', 'Set metrics load failed', e.message));
     }
-
-    broadcast(signalAnalyzer.emptyState());
   }
 
   else if (channel === 'pack-opened') {
-    const { packEventId, packNumber, pickNumber, cards, setCode, format } = data;
+    const { packEventId, packNumber, pickNumber, packSize, cards, setCode } = data;
 
-    // Section 6C: extra guard — refuse to re-process the same packEventId.
-    // Parser-level dedup is the primary defense; this catches any re-broadcast
-    // that might slip past it (e.g. from testReplay or from log re-reads).
+    // Refuse to re-process the same packEventId (parser-level dedup is the
+    // primary defense; this catches re-broadcasts from testReplay etc.).
     if (packEventId && packEventId === lastHandledPackEventId) {
       appLogger.log('assistant', 'debug', `Duplicate packEventId rejected at assistant: ${packEventId}`);
       return;
@@ -116,39 +133,23 @@ async function handleEvent(channel, data) {
     lastHandledPackEventId = packEventId ?? null;
 
     const sc = setCode || draftTracker.getState().setCode;
-    const fmt = format || draftTracker.getState().format;
+    if (packSize) draftTracker.setPackSize(packSize);
+    currentPosition = { packNumber, pickNumber, packSize: packSize ?? draftTracker.getState().packSize };
 
-    const enriched = await enrichCards(cards, sc, fmt);
+    const landsMap = await loadLandsMap(sc);
+    const enriched = (cards ?? []).map(c => enrichOne(c.grpId, landsMap));
     pendingPackCards = enriched;
 
     draftTracker.recordPackSeen({ packNumber, pickNumber, cards: enriched });
-
-    const trackerState = draftTracker.getState();
-    const state = signalAnalyzer.analyze(trackerState, enriched, pickNumber, assistantSettings);
-    broadcast(state);
+    reanalyze(enriched);
   }
 
   else if (channel === 'card-picked') {
     const { grpId, packNumber, pickNumber } = data;
     const trackerState = draftTracker.getState();
 
-    // Look up enriched card from the current pack or from lands data
     const enrichedCard = (pendingPackCards ?? []).find(c => c.grpId === grpId)
-      ?? await (async () => {
-        const scryfall = landsData.getScryfallCardData(grpId) ?? {};
-        const result = await landsData.fetchSetData(trackerState.setCode, trackerState.format).catch(() => null);
-        const lands = result?.data ? result.data.find(c => c.mtgaId === grpId) : null;
-        return {
-          grpId,
-          name: lands?.name ?? scryfall.name ?? `#${grpId}`,
-          color: lands?.color ?? scryfall.colorIdentity ?? '',
-          cmc: lands?.cmc ?? scryfall.cmc ?? null,
-          rarity: lands?.rarity ?? scryfall.rarity ?? 'common',
-          typeLine: scryfall.typeLine ?? '',
-          oracleText: scryfall.oracleText ?? '',
-          stats: lands?.stats ?? null,
-        };
-      })();
+      ?? enrichOne(grpId, await loadLandsMap(trackerState.setCode));
 
     draftTracker.recordPick({
       packNumber,
@@ -160,24 +161,36 @@ async function handleEvent(channel, data) {
 
     // Remove picked card from pending pack
     if (pendingPackCards) {
-      pendingPackCards = pendingPackCards.filter(c => c.grpId !== grpId);
+      // Remove one copy only — packs can contain duplicates.
+      const i = pendingPackCards.findIndex(c => c.grpId === grpId);
+      if (i >= 0) pendingPackCards = [...pendingPackCards.slice(0, i), ...pendingPackCards.slice(i + 1)];
     }
 
-    const updatedTrackerState = draftTracker.getState();
-    const state = signalAnalyzer.analyze(updatedTrackerState, null, pickNumber, assistantSettings);
-    broadcast(state);
+    reanalyze(null);
   }
 
   else if (channel === 'draft-ended') {
-    draftTracker.reset();
+    // Keep the final pool on screen; just stop recommending.
     pendingPackCards = null;
     lastHandledPackEventId = null;
-    broadcast(signalAnalyzer.emptyState());
+    reanalyze(null);
   }
+}
+
+/** Re-read card + archetype data (after a manual refresh) and re-analyze. */
+function reloadSetMetrics(setCode) {
+  queue = queue.then(async () => {
+    if (!setCode || draftTracker.getState().setCode !== setCode) return;
+    const metrics = await loadSetMetrics(setCode);
+    if (!metrics) return;
+    draftTracker.setSetMetrics(metrics);
+    reanalyze(pendingPackCards);
+  }).catch((e) => appLogger.log('assistant', 'warn', 'Set metrics reload failed', e.message));
+  return queue;
 }
 
 function getState() {
   return currentState;
 }
 
-module.exports = { init, handleEvent, getState };
+module.exports = { init, handleEvent, getState, reloadSetMetrics };

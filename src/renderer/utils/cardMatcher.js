@@ -4,7 +4,7 @@
  * Matches Arena card GRP IDs / names to 17Lands card data.
  *
  * Flow:
- *  1. On draft-started, renderer calls electronAPI.fetchSetData(setCode, format)
+ *  1. On draft-started, renderer calls electronAPI.fetchSetData(setCode)
  *     → main process fetches from 17Lands (or disk cache), returns normalized cards
  *  2. loadSetData() builds by-name and by-id lookup maps
  *  3. On each pack-opened event we receive cards with grpIds and maybe names
@@ -17,13 +17,14 @@
  *  D. Levenshtein distance ≤ 2              (catches minor typos / unicode edge cases)
  */
 
-// setCode+format → Map<normalizedName, NormalizedCard>
+// setCode → Map<normalizedName, NormalizedCard>
+// (17Lands data is always PremierDraft, so the set code alone is the key.)
 const setLookup = new Map();
 
-// setCode+format → Map<strippedName, NormalizedCard>  (secondary lookup)
+// setCode → Map<strippedName, NormalizedCard>  (secondary lookup)
 const strippedLookup = new Map();
 
-// setCode+format → Map<mtgaId (number), NormalizedCard>
+// setCode → Map<mtgaId (number), NormalizedCard>
 const idLookup = new Map();
 
 // grpId → { name, cmc, colorIdentity, rarity }  (from Scryfall)
@@ -96,11 +97,9 @@ function levenshtein(a, b) {
 /**
  * Load 17Lands card data for a set into the lookup maps.
  * @param {string} setCode
- * @param {string} format
  * @param {Array<object>} cards  Normalized cards from 17Lands (via main process)
  */
-export function loadSetData(setCode, format, cards) {
-  const key = `${setCode}:${format}`;
+export function loadSetData(setCode, cards) {
   const nameMap     = new Map();
   const strippedMap = new Map();
   const idMap       = new Map();
@@ -113,38 +112,16 @@ export function loadSetData(setCode, format, cards) {
     }
     if (card.mtgaId != null) idMap.set(card.mtgaId, card);
   }
-  setLookup.set(key, nameMap);
-  strippedLookup.set(key, strippedMap);
-  idLookup.set(key, idMap);
-  console.log(`[cardMatcher] Loaded ${nameMap.size} cards for ${key} (${idMap.size} with Arena IDs)`);
-}
-
-/**
- * Load color-pair specific data, overlaying pair stats onto base set data.
- */
-export function loadColorPairData(setCode, format, colorPair, cards) {
-  const key         = `${setCode}:${format}:${colorPair}`;
-  const map         = new Map();
-  const strippedMap = new Map();
-  for (const card of cards) {
-    if (card.name) {
-      map.set(normalizeName(card.name), card);
-      strippedMap.set(normalizeStrict(card.name), card);
-    }
-  }
-  setLookup.set(key, map);
-  strippedLookup.set(key, strippedMap);
+  setLookup.set(setCode, nameMap);
+  strippedLookup.set(setCode, strippedMap);
+  idLookup.set(setCode, idMap);
+  console.log(`[cardMatcher] Loaded ${nameMap.size} cards for ${setCode} (${idMap.size} with Arena IDs)`);
 }
 
 export function clearSetData(setCode) {
-  for (const k of setLookup.keys()) {
-    if (!setCode || k.startsWith(setCode)) setLookup.delete(k);
-  }
-  for (const k of strippedLookup.keys()) {
-    if (!setCode || k.startsWith(setCode)) strippedLookup.delete(k);
-  }
-  for (const k of idLookup.keys()) {
-    if (!setCode || k.startsWith(setCode)) idLookup.delete(k);
+  for (const map of [setLookup, strippedLookup, idLookup]) {
+    if (setCode) map.delete(setCode);
+    else map.clear();
   }
 }
 
@@ -165,10 +142,9 @@ export function getCachedCard(grpId) {
 /**
  * Look up a card by Arena grpId directly against 17Lands data.
  */
-function lookupByGrpId(grpId, setCode, format) {
+function lookupByGrpId(grpId, setCode) {
   if (!grpId || !setCode) return null;
-  const baseKey = `${setCode}:${format}`;
-  return idLookup.get(baseKey)?.get(grpId) ?? null;
+  return idLookup.get(setCode)?.get(grpId) ?? null;
 }
 
 /**
@@ -180,30 +156,20 @@ function lookupByGrpId(grpId, setCode, format) {
  *
  * Returns { card, method } so the caller can log how the match was found.
  */
-function lookupByName(name, setCode, format, colorPair) {
+function lookupByName(name, setCode) {
   if (!name) return null;
-  const baseKey = `${setCode}:${format}`;
 
   // ── Pass A: standard normalization ───────────────────────────────────────
   const norm = normalizeName(name);
-  if (colorPair && colorPair !== 'all') {
-    const hit = setLookup.get(`${setCode}:${format}:${colorPair}`)?.get(norm);
-    if (hit) return { card: hit, method: 'name-exact-pair' };
-  }
-  const hitBase = setLookup.get(baseKey)?.get(norm);
+  const hitBase = setLookup.get(setCode)?.get(norm);
   if (hitBase) return { card: hitBase, method: 'name-exact' };
 
   // ── Pass B: strict stripped normalization ─────────────────────────────────
-  const strict = normalizeStrict(name);
-  if (colorPair && colorPair !== 'all') {
-    const hit = strippedLookup.get(`${setCode}:${format}:${colorPair}`)?.get(strict);
-    if (hit) return { card: hit, method: 'name-stripped-pair' };
-  }
-  const hitStripped = strippedLookup.get(baseKey)?.get(strict);
+  const hitStripped = strippedLookup.get(setCode)?.get(normalizeStrict(name));
   if (hitStripped) return { card: hitStripped, method: 'name-stripped' };
 
   // ── Pass C: Levenshtein distance ≤ 2 ─────────────────────────────────────
-  const nameMap = setLookup.get(baseKey);
+  const nameMap = setLookup.get(setCode);
   if (nameMap && nameMap.size > 0) {
     let bestCard = null, bestDist = 3; // threshold: accept distance ≤ 2
     for (const [candidateNorm, candidate] of nameMap) {
@@ -225,16 +191,14 @@ function lookupByName(name, setCode, format, colorPair) {
  *
  * @param {Array<{grpId: number, name?: string}>} cards
  * @param {string} setCode
- * @param {string} format
- * @param {string} colorPair  Currently active color filter
  * @returns {Array<EnrichedCard>}
  */
-export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 'all') {
+export function matchCards(cards, setCode) {
   if (!cards || cards.length === 0) return [];
 
   const results = cards.map((card) => {
     // 1. Try direct grpId → 17Lands lookup (most reliable)
-    const byId = setCode ? lookupByGrpId(card.grpId, setCode, format) : null;
+    const byId = setCode ? lookupByGrpId(card.grpId, setCode) : null;
 
     // 2. Resolve name: log name → Scryfall cache → 17Lands by-id name
     let name = card.name;
@@ -244,17 +208,10 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
       name = scryfallData?.name ?? byId?.name ?? null;
     }
 
-    // 3. Name-based 17Lands lookup (fallback when byId misses, or for color-pair overlay)
-    let byNameResult = null;
-    if ((!byId || (colorPair && colorPair !== 'all')) && name && setCode) {
-      byNameResult = lookupByName(name, setCode, format, colorPair);
-    }
+    // 3. Name-based 17Lands lookup (fallback when the grpId isn't in 17Lands' data)
+    const byNameResult = !byId && name && setCode ? lookupByName(name, setCode) : null;
     const byName = byNameResult?.card ?? null;
-
-    // For color-pair overlay, prefer byName (pair stats) over byId (base stats)
-    const lands = (colorPair && colorPair !== 'all')
-      ? (byName ?? byId)
-      : (byId ?? byName);
+    const lands = byId ?? byName;
 
     // ── Debug log ────────────────────────────────────────────────────────────
     const displayName = name ?? `#${card.grpId}`;
@@ -266,7 +223,7 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
       const method = byNameResult?.method ?? 'name';
       console.log(`[cardMatcher] NAME-MATCH(${method}) "${displayName}" → "${lands.name}" grade=${gradeStr} GIH%=${gihwr != null ? (gihwr*100).toFixed(1)+'%' : 'null'}`);
     } else {
-      const nearest = findNearest(displayName, setCode, format);
+      const nearest = findNearest(displayName, setCode);
       console.warn(`[cardMatcher] NO-MATCH  "${displayName}" grpId=${card.grpId} — nearest: "${nearest?.name ?? 'none'}" (stripped: "${normalizeStrict(displayName)}")`);
     }
 
@@ -277,8 +234,7 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
       rarity:   lands?.rarity ?? card.rarity ?? scryfallData?.rarity ?? 'common',
       cmc:      lands?.cmc ?? card.cmc ?? scryfallData?.cmc ?? null,
       // Collector number from 17Lands array index — drives Arena visual sort order.
-      // Always taken from base-set byId so color-pair overlays don't corrupt order.
-      collectorNumber: byId?.collectorNumber ?? byName?.collectorNumber ?? null,
+      collectorNumber: lands?.collectorNumber ?? null,
       stats:    lands?.stats ?? null,
       // true = found in 17Lands (may still have null grade if data not yet available)
       // false/absent = not found in 17Lands at all (only Scryfall or no data)
@@ -292,9 +248,9 @@ export function matchCards(cards, setCode, format = 'PremierDraft', colorPair = 
 /**
  * Find the nearest card name in 17Lands data (for debug logging on misses).
  */
-function findNearest(name, setCode, format) {
+function findNearest(name, setCode) {
   if (!name || !setCode) return null;
-  const nameMap = setLookup.get(`${setCode}:${format}`);
+  const nameMap = setLookup.get(setCode);
   if (!nameMap) return null;
   const norm = normalizeStrict(name);
   let bestCard = null, bestDist = Infinity;
@@ -309,12 +265,12 @@ function findNearest(name, setCode, format) {
  * Get the IDs of cards in a pack that still need Scryfall name resolution.
  * Skips cards already resolvable via 17Lands idLookup or scryfallCache.
  */
-export function getMissingIds(cards, setCode, format = 'PremierDraft') {
+export function getMissingIds(cards, setCode) {
   return cards
     .filter((c) => {
       if (!c.grpId || c.name) return false;
       if (scryfallCache.has(c.grpId)) return false;
-      if (setCode && lookupByGrpId(c.grpId, setCode, format)) return false;
+      if (setCode && lookupByGrpId(c.grpId, setCode)) return false;
       return true;
     })
     .map((c) => c.grpId);

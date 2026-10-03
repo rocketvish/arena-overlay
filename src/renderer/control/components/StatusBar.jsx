@@ -32,25 +32,31 @@ const SET_NAMES = {
   MOM: 'March of the Machine', ONE: 'Phyrexia: All Will Be One',
   BRO: 'The Brothers War', DMU: 'Dominaria United',
   FDN: 'Foundations', TDM: 'Tarkir: Dragonstorm',
-  FIN: 'Final Fantasy', ECL: 'Edge of Eternities',
-  TMT: 'Teenage Mutant Ninja Turtles',
+  FIN: 'Final Fantasy', EOE: 'Edge of Eternities', ECL: 'Lorwyn Eclipsed',
+  TLA: 'Avatar: The Last Airbender', TMT: 'Teenage Mutant Ninja Turtles',
 };
 
-function OverlayLockChip({ isInteractable }) {
+// Click to lock/unlock — works even when the hotkey is taken by another app.
+function OverlayLockChip({ isInteractable, hotkey }) {
   const color = isInteractable ? '#5cc8ff' : '#7a7a7a';
   const bg = isInteractable ? 'rgba(92,200,255,0.18)' : 'rgba(255,255,255,0.04)';
   const border = isInteractable ? 'rgba(92,200,255,0.55)' : 'rgba(255,255,255,0.12)';
-  const label = isInteractable ? 'OVERLAY: UNLOCKED' : 'OVERLAY: LOCKED';
+  const label = isInteractable ? 'OVERLAY: UNLOCKED — click to lock' : 'OVERLAY: LOCKED — click to unlock';
+  const hotkeyNote = !hotkey?.key ? ''
+    : hotkey.ok ? ` (or press ${hotkey.key})`
+    : `. The ${hotkey.key} hotkey could not be registered — another app is using it; change it in Settings.`;
   return (
-    <span title={isInteractable
-      ? 'Overlay is interactive — click to drag/resize'
-      : 'Overlay is click-through (locked). Press Alt+D in the overlay to unlock.'}
+    <button
+      onClick={() => window.electronAPI?.setOverlayLocked?.(isInteractable)}
+      title={(isInteractable
+        ? 'Overlay can be dragged and resized. Click to lock it (click-through, fixed in place)'
+        : 'Overlay is click-through and fixed in place. Click to unlock it for moving/resizing') + hotkeyNote}
       style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
       padding: '2px 8px', borderRadius: 4,
       background: bg, border: `1px solid ${border}`,
       fontSize: 10, fontWeight: 700, color, letterSpacing: '0.04em',
-      flexShrink: 0,
+      flexShrink: 0, cursor: 'pointer', fontFamily: 'inherit',
     }}>
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
         {isInteractable ? (
@@ -60,11 +66,12 @@ function OverlayLockChip({ isInteractable }) {
         )}
       </svg>
       {label}
-    </span>
+      {hotkey && !hotkey.ok && <span style={{ color: '#e0a030' }} title={`${hotkey.key} is in use by another app`}>⚠</span>}
+    </button>
   );
 }
 
-export default function StatusBar({ status, draftState, watcherRunning, isInteractable }) {
+export default function StatusBar({ status, draftState, watcherRunning, isInteractable, interactHotkey }) {
   const { inDraft, setCode, packNumber, pickNumber, format } = draftState;
   const statusLabel = STATUS_LABELS[status] ?? status ?? 'Watching...';
   const statusColor = STATUS_COLORS[status] ?? '#888';
@@ -95,7 +102,7 @@ export default function StatusBar({ status, draftState, watcherRunning, isIntera
       </span>
 
       {/* Overlay lock state — visible regardless of draft state */}
-      <OverlayLockChip isInteractable={!!isInteractable} />
+      <OverlayLockChip isInteractable={!!isInteractable} hotkey={interactHotkey} />
 
       {/* Pack/pick info when in draft */}
       {inDraft && (

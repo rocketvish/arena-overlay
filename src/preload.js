@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Overlay controls ──────────────────────────────────────────────────────
   toggleInteract: () => ipcRenderer.send('overlay:toggle-interact'),
+  setOverlayLocked: (locked) => ipcRenderer.invoke('overlay:set-locked', locked),
+  getOverlayLocked: () => ipcRenderer.invoke('overlay:get-locked'),
+  resizeOverlay: (width, height) => ipcRenderer.send('overlay:resize', width, height),
+  getHotkeyStatus: () => ipcRenderer.invoke('hotkeys:status'),
   toggleVisibility: () => ipcRenderer.send('overlay:toggle-visibility'),
   getOverlayVisible: () => ipcRenderer.invoke('overlay:get-visible'),
   setOverlayVisible: (visible) => ipcRenderer.invoke('overlay:set-visible', visible),
@@ -27,10 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── 17Lands data ─────────────────────────────────────────────────────────
   fetchSetData: (setCode, format) =>
     ipcRenderer.invoke('17lands:fetch-set', setCode, format),
-  fetchColorPairData: (setCode, format, colorPair) =>
-    ipcRenderer.invoke('17lands:fetch-color-pair', setCode, format, colorPair),
-  clearCache: (setCode, format) =>
-    ipcRenderer.invoke('17lands:clear-cache', setCode, format),
+  refreshSetData: (setCode) => ipcRenderer.invoke('17lands:refresh', setCode),
+  clearCache: (setCode) => ipcRenderer.invoke('17lands:clear-cache', setCode),
 
   // ── Scryfall ─────────────────────────────────────────────────────────────
   resolveArenaIds: (grpIds) => ipcRenderer.invoke('scryfall:resolve-ids', grpIds),
@@ -149,6 +151,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const h = (_e, d) => cb(d);
     ipcRenderer.on('update-downloaded', h);
     return () => ipcRenderer.removeListener('update-downloaded', h);
+  },
+  onHotkeysStatus: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('hotkeys-status', h);
+    return () => ipcRenderer.removeListener('hotkeys-status', h);
   },
   onParseWarning: (cb) => {
     const h = (_e, d) => cb(d);

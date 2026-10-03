@@ -8,11 +8,12 @@ import { useAssistantState } from './hooks/useAssistantState';
 
 export default function App() {
   const { settings, loading: settingsLoading } = useSettings();
-  const { draftState } = useDraftState(settings);
+  const { draftState } = useDraftState();
   const assistantState = useAssistantState();
 
   const [status, setStatus] = useState('watching');
   const [isInteractable, setIsInteractable] = useState(false);
+  const [hotkeys, setHotkeys] = useState(null);
   const [isMinimized, setIsMinimized] = useState(false);
   const [lastLogUpdate, setLastLogUpdate] = useState(null);
 
@@ -34,12 +35,15 @@ export default function App() {
 
   useEffect(() => {
     if (!window.electronAPI) return;
+    window.electronAPI.getOverlayLocked?.().then((locked) => setIsInteractable(!locked));
+    window.electronAPI.getHotkeyStatus?.().then(setHotkeys);
     const unsubs = [
       window.electronAPI.onStatusUpdate(setStatus),
       window.electronAPI.onInteractableChanged(setIsInteractable),
+      window.electronAPI.onHotkeysStatus?.(setHotkeys),
       window.electronAPI.onLogUpdated(setLastLogUpdate),
     ];
-    return () => unsubs.forEach((fn) => fn());
+    return () => unsubs.forEach((fn) => fn && fn());
   }, []);
 
   if (settingsLoading) return null;
@@ -62,6 +66,7 @@ export default function App() {
       userSelect: isInteractable ? 'auto' : 'none',
       pointerEvents: isInteractable ? 'auto' : 'none',
       transition: 'border-color 0.2s, box-shadow 0.2s',
+      position: 'relative',
     }}>
       <TestModeBanner />
       {showInteractiveBanner && (
@@ -75,8 +80,11 @@ export default function App() {
           textAlign: 'center',
           flexShrink: 0,
           letterSpacing: '0.02em',
+          // Part of the drag handle — it sits where people grab right after unlocking.
+          WebkitAppRegion: 'drag',
+          cursor: 'move',
         }}>
-          INTERACTIVE — click to drag/resize, Alt+D to lock
+          UNLOCKED — drag the top bar to move, corner to resize{hotkeys?.interact?.ok ? `, ${hotkeys.interact.key} to lock` : ''}
         </div>
       )}
       <OverlayHeader
@@ -86,6 +94,8 @@ export default function App() {
         packNumber={draftState.packNumber}
         pickNumber={draftState.pickNumber}
         totalPicks={draftState.totalPicks}
+        packSize={draftState.packSize}
+        interactHotkey={hotkeys?.interact}
         isInteractable={isInteractable}
         isMinimized={isMinimized}
         onToggleMinimize={() => setIsMinimized((m) => !m)}
@@ -95,7 +105,7 @@ export default function App() {
         packCardCount={draftState.enrichedPack?.length ?? 0}
         packCardCountMismatch={
           draftState.inDraft &&
-          (draftState.enrichedPack?.length ?? 0) > Math.max(1, 15 - (draftState.pickNumber ?? 0))
+          (draftState.enrichedPack?.length ?? 0) > Math.max(1, (draftState.packSize ?? 14) - (draftState.pickNumber ?? 0))
         }
       />
 
@@ -107,6 +117,46 @@ export default function App() {
           assistantState={assistantState}
         />
       )}
+      {isInteractable && !isMinimized && <ResizeGrip />}
     </div>
+  );
+}
+
+// Bottom-right resize handle. Transparent windows can't be edge-resized on
+// Windows, so the overlay resizes itself through the main process.
+function ResizeGrip() {
+  const onPointerDown = (e) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const start = { x: e.screenX, y: e.screenY, w: window.outerWidth, h: window.outerHeight };
+    let frame = null;
+    const onMove = (ev) => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        window.electronAPI?.resizeOverlay(start.w + ev.screenX - start.x, start.h + ev.screenY - start.y);
+      });
+    };
+    const onUp = () => {
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+  };
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      title="Drag to resize"
+      style={{
+        position: 'absolute', right: 0, bottom: 0, width: 18, height: 18,
+        cursor: 'nwse-resize', WebkitAppRegion: 'no-drag', zIndex: 10,
+        background: 'linear-gradient(135deg, transparent 50%, rgba(92,200,255,0.75) 50%)',
+        borderBottomRightRadius: 6,
+      }}
+    />
   );
 }

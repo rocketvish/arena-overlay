@@ -88,6 +88,7 @@ const PICK_KIND_META = {
   upside: { icon: '⚡', color: '#ffce5c', label: 'Upside', bg: 'rgba(255,206,92,0.10)', border: 'rgba(255,206,92,0.32)' },
   need:   { icon: '🔧', color: '#e88c64', label: 'Need',   bg: 'rgba(232,140,100,0.10)', border: 'rgba(232,140,100,0.32)' },
   clear:  { icon: '★', color: '#7ec8a0', label: 'Clear pick', bg: 'rgba(126,200,160,0.12)', border: 'rgba(126,200,160,0.34)' },
+  wheel:  { icon: '⟲', color: '#c89cff', label: 'Wheel play', bg: 'rgba(200,156,255,0.10)', border: 'rgba(200,156,255,0.32)' },
 };
 
 function PickOptionCard({ pick }) {
@@ -114,8 +115,9 @@ function PickOptionCard({ pick }) {
             {card?.name ?? `#${card?.grpId ?? '?'}`}
           </span>
           {grade && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: gradeColor, marginLeft: 'auto', flexShrink: 0 }}>
-              {grade}
+            <span style={{ fontSize: 11, fontWeight: 700, color: gradeColor, marginLeft: 'auto', flexShrink: 0 }}
+                  title={card?.stats?.gradeEstimated ? 'Estimated: 17Lands withholds GIH% under 500 games' : undefined}>
+              {card?.stats?.gradeEstimated ? `~${grade}` : grade}
             </span>
           )}
         </div>
@@ -376,8 +378,8 @@ const SORT_OPTIONS = [
   { value: 'name',  label: 'Name' },
 ];
 
-export default function DraftPanel({ draftState, assistantState, settings, onSet, reEnrichWithColorPair }) {
-  const { inDraft, enrichedPack, pickedCards, packId } = draftState;
+export default function DraftPanel({ draftState, assistantState, settings, onSet, onRefreshData }) {
+  const { inDraft, enrichedPack, pickedCards, packId, landsFetchedAt, landsStale, landsStatus } = draftState;
   // Recommendation comes from the assistant pipeline (signalAnalyzer) — not draftState.
   const recommendation = assistantState?.recommendation ?? draftState.recommendation ?? null;
   const signalInsights = assistantState?.signalInsights ?? [];
@@ -395,8 +397,8 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
   const recommendedGrpId = recommendation?.primary?.grpId ?? null;
 
   function handleColorChange(val) {
+    // Filters the list only. (17Lands' public card endpoint has no per-color-pair stats.)
     onSet('display.colorFilter', val);
-    reEnrichWithColorPair?.(val);
   }
 
   function handleSortChange(val) {
@@ -449,6 +451,18 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
         <span style={{ fontSize: 11, color: '#555', flex: 1 }}>
           Pack ({(enrichedPack ?? []).length} cards) — sorted by
         </span>
+        <span style={{ fontSize: 10, color: landsStale ? '#d8c070' : '#556' }}
+              title={landsFetchedAt ? `17Lands data downloaded ${new Date(landsFetchedAt).toLocaleString()}` : undefined}>
+          17Lands{landsFetchedAt ? ` · ${new Date(landsFetchedAt).toLocaleDateString()} ${new Date(landsFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}{landsStale ? ' (old snapshot)' : ''}
+        </span>
+        <button onClick={() => onRefreshData?.()} disabled={landsStatus === 'fetching'}
+          title="Download the latest 17Lands numbers now (normally refreshed every 12 hours)"
+          style={{
+            background: 'rgba(30,30,50,0.9)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 4,
+            color: '#c8c8c8', fontSize: 11, padding: '3px 8px', cursor: landsStatus === 'fetching' ? 'wait' : 'pointer',
+          }}>
+          {landsStatus === 'fetching' ? 'Refreshing…' : '↻ Refresh'}
+        </button>
         <select
           value={sortBy}
           onChange={(e) => handleSortChange(e.target.value)}
@@ -475,7 +489,7 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
         ) : (
           sortedFiltered.map((card, i) => (
             <CardRow
-              key={`${packId ?? 0}-${card.grpId ?? i}`}
+              key={`${packId ?? 0}-${i}-${card.grpId}`}
               card={card}
               columns={columns}
               compact={compact}

@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS = {
     gihwr: true,
     ohwr: true,
     gpwr: false,
+    ata: true,
     alsa: false,
     iwd: false,
   },

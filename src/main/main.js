@@ -11,8 +11,24 @@ const testReplay       = require('./testReplay');
 
 const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
 
+// Dev/test hook: run against a separate profile (settings, cache, logs) so a
+// test session never touches the real one. Must happen before anything reads userData.
+if (!app.isPackaged && process.env.ARENA_OVERLAY_USERDATA) {
+  app.setPath('userData', process.env.ARENA_OVERLAY_USERDATA);
+}
+
+// One instance only. A second copy (e.g. launched from the Start menu while the
+// tray copy is running) used to create a second overlay window — which could
+// never be unlocked because the first instance owns the Alt+D hotkey — and a
+// second log watcher, doubling every draft event.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
 let overlayWindow = null;
 let isInteractable = false;
+const hotkeyStatus = { toggle: null, interact: null }; // { key, ok } per hotkey
 
 const DRAFT_FORMATS = new Set(['PremierDraft', 'QuickDraft', 'TradDraft', 'Sealed']);
 const COLOR_PAIRS = new Set(['W', 'U', 'B', 'R', 'G', 'WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG']);
@@ -26,6 +42,7 @@ const SETTING_VALIDATORS = {
   'columns.gpwr': (v) => typeof v === 'boolean',
   'columns.alsa': (v) => typeof v === 'boolean',
   'columns.iwd': (v) => typeof v === 'boolean',
+  'columns.ata': (v) => typeof v === 'boolean',
   'assistant.enabled': (v) => typeof v === 'boolean',
   'assistant.showSignalsInOverlay': (v) => typeof v === 'boolean',
   'assistant.showRecommendationInOverlay': (v) => typeof v === 'boolean',
@@ -84,13 +101,6 @@ function sanitizeFormat(format) {
   if (format == null || format === '') return 'PremierDraft';
   if (!DRAFT_FORMATS.has(format)) throw new Error('Invalid draft format');
   return format;
-}
-
-function sanitizeColorPair(colorPair) {
-  if (typeof colorPair !== 'string') throw new Error('Invalid color pair');
-  const normalized = colorPair.trim().toUpperCase();
-  if (!COLOR_PAIRS.has(normalized)) throw new Error('Invalid color pair');
-  return normalized;
 }
 
 function sanitizeArenaIds(grpIds) {
@@ -160,27 +170,47 @@ function broadcastToAll(channel, data) {
 
 // ─── Window Creation ────────────────────────────────────────────────────────
 
+/** Saved position, or a default top-right spot if it's unset or off every screen. */
+function initialOverlayBounds(overlay) {
+  const width = overlay.width;
+  const height = overlay.height;
+  const defaultPos = () => {
+    const { workArea } = screen.getPrimaryDisplay();
+    return { x: workArea.x + workArea.width - width - 10, y: workArea.y + 50 };
+  };
+  if (overlay.x === -1) return { ...defaultPos(), width, height };
+  // Require the title strip to be on some display (monitor unplugged, resolution changed…).
+  const visible = screen.getAllDisplays().some(({ workArea: a }) =>
+    overlay.x + 40 > a.x && overlay.x < a.x + a.width - 40 &&
+    overlay.y >= a.y - 10 && overlay.y < a.y + a.height - 30);
+  return visible ? { x: overlay.x, y: overlay.y, width, height } : { ...defaultPos(), width, height };
+}
+
+/** Show the overlay without taking keyboard focus away from Arena. */
+function showOverlay() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  overlayWindow.showInactive();
+  // Windows can drop TOPMOST when a fullscreen app activates; re-assert it.
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+}
+
+function hideOverlay() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
+}
+
 function createOverlayWindow() {
   const s = settings.get();
   const { overlay } = s;
 
-  let x = overlay.x;
-  let y = overlay.y;
-  if (x === -1) {
-    const { workAreaSize } = screen.getPrimaryDisplay();
-    x = workAreaSize.width - overlay.width - 10;
-  }
-
   overlayWindow = new BrowserWindow({
-    x,
-    y,
-    width: overlay.width,
-    height: overlay.height,
+    ...initialOverlayBounds(overlay),
     opacity: overlay.opacity,
     frame: false,
     transparent: true,
-    resizable: true,
-    movable: true,
+    // Start locked: click-through, can't take focus, can't be moved/resized.
+    resizable: false,
+    movable: false,
+    focusable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     show: false,
@@ -192,7 +222,8 @@ function createOverlayWindow() {
   });
 
   hardenWindowNavigation(overlayWindow);
-  setClickThrough(true);
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  setOverlayLocked(true);
 
   if (isDev) {
     overlayWindow.loadURL('http://localhost:5173');
@@ -203,8 +234,11 @@ function createOverlayWindow() {
   }
 
   overlayWindow.once('ready-to-show', () => {
-    // Overlay is hidden by default — shows automatically when draft starts
-    if (overlay.visible) overlayWindow.show();
+    if (overlay.visible) {
+      showOverlay();
+      // The control window may have asked before the overlay was shown.
+      sendToWindows('overlay-visibility-changed', true);
+    }
   });
 
   overlayWindow.on('moved', saveWindowBounds);
@@ -214,12 +248,46 @@ function createOverlayWindow() {
   return overlayWindow;
 }
 
-function setClickThrough(clickThrough) {
-  if (!overlayWindow) return;
-  overlayWindow.setIgnoreMouseEvents(clickThrough, { forward: true });
-  isInteractable = !clickThrough;
+/**
+ * Locked (the default): the overlay ignores the mouse entirely — clicks and
+ * drags go straight to Arena — it can't take keyboard focus, and it can't be
+ * moved or resized. Unlocked: a normal draggable/resizable window.
+ *
+ * No `{ forward: true }` on setIgnoreMouseEvents: on Windows that installs a
+ * global low-level mouse hook just to deliver hover events we never use, and
+ * such hooks are a known source of cursor lag in games.
+ */
+function setOverlayLocked(locked) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
+  overlayWindow.setIgnoreMouseEvents(locked);
+  overlayWindow.setFocusable(!locked);
+  overlayWindow.setMovable(!locked);
+  // Not toggling `resizable`: transparent windows can't be edge-resized on
+  // Windows anyway (the renderer has its own resize grip, see
+  // overlay:resize), and toggling it made the window grow 1px per lock/unlock.
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  if (locked) {
+    // Hand keyboard focus back to whatever is underneath (Arena).
+    if (overlayWindow.isFocused()) overlayWindow.blur();
+  } else {
+    // Unlocking a hidden overlay would look like nothing happened.
+    if (!overlayWindow.isVisible()) {
+      showOverlay();
+      broadcastToAll('overlay-visibility-changed', true);
+    }
+    overlayWindow.focus();
+  }
+
+  isInteractable = !locked;
   // Broadcast to all windows so the control window status bar updates too
   sendToWindows('interactable-changed', isInteractable);
+  tray.setLocked?.(locked);
+}
+
+function toggleOverlayLock() {
+  setOverlayLocked(isInteractable);
 }
 
 function saveWindowBounds() {
@@ -246,8 +314,11 @@ function registerIPC() {
     const updated = settings.set(safe.keyPath, safe.value);
     if (safe.keyPath === 'overlay.opacity') overlayWindow?.setOpacity(safe.value);
     if (safe.keyPath === 'overlay.visible') {
-      safe.value ? overlayWindow?.show() : overlayWindow?.hide();
+      safe.value ? showOverlay() : hideOverlay();
       broadcastToAll('overlay-visibility-changed', safe.value);
+    }
+    if (safe.keyPath === 'general.hotkey_toggle' || safe.keyPath === 'general.hotkey_interact') {
+      registerShortcuts();
     }
     // Broadcast to all windows so they update in real-time
     broadcastToAll('settings-changed', updated);
@@ -262,13 +333,40 @@ function registerIPC() {
   // ── Overlay controls ──────────────────────────────────────────────────────
   ipcMain.on('overlay:toggle-interact', (event) => {
     assertTrustedSender(event);
-    setClickThrough(isInteractable);
+    toggleOverlayLock();
+  });
+  ipcMain.handle('overlay:set-locked', (event, locked) => {
+    assertTrustedSender(event);
+    if (typeof locked !== 'boolean') throw new Error('Invalid lock value');
+    setOverlayLocked(locked);
+    return !isInteractable;
+  });
+  // Resize grip in the overlay (only while unlocked).
+  let saveBoundsTimer = null;
+  ipcMain.on('overlay:resize', (event, width, height) => {
+    assertTrustedSender(event);
+    if (!overlayWindow || overlayWindow.isDestroyed() || !isInteractable) return;
+    const w = Math.round(Number(width));
+    const h = Math.round(Number(height));
+    if (!Number.isFinite(w) || !Number.isFinite(h)) return;
+    const { x, y } = overlayWindow.getBounds();
+    overlayWindow.setBounds({ x, y, width: Math.min(Math.max(w, 260), 1600), height: Math.min(Math.max(h, 160), 2000) });
+    clearTimeout(saveBoundsTimer);
+    saveBoundsTimer = setTimeout(saveWindowBounds, 300);
+  });
+  ipcMain.handle('overlay:get-locked', (event) => {
+    assertTrustedSender(event);
+    return !isInteractable;
+  });
+  ipcMain.handle('hotkeys:status', (event) => {
+    assertTrustedSender(event);
+    return hotkeyStatus;
   });
   ipcMain.on('overlay:toggle-visibility', (event) => {
     assertTrustedSender(event);
     if (!overlayWindow) return;
     const nowVisible = !overlayWindow.isVisible();
-    nowVisible ? overlayWindow.show() : overlayWindow.hide();
+    nowVisible ? showOverlay() : hideOverlay();
     broadcastToAll('overlay-visibility-changed', nowVisible);
   });
   ipcMain.handle('overlay:get-visible', (event) => {
@@ -279,7 +377,7 @@ function registerIPC() {
     assertTrustedSender(event);
     if (typeof visible !== 'boolean') throw new Error('Invalid visibility value');
     if (!overlayWindow) return false;
-    visible ? overlayWindow.show() : overlayWindow.hide();
+    visible ? showOverlay() : hideOverlay();
     broadcastToAll('overlay-visibility-changed', visible);
     return visible;
   });
@@ -321,22 +419,21 @@ function registerIPC() {
     return result;
   });
 
-  ipcMain.handle('17lands:fetch-color-pair', async (event, setCode, format, colorPair) => {
+  // Force a fresh download (bypasses the 12h cache). The renderer re-applies
+  // the result when the 17lands-status 'loaded' broadcast arrives.
+  ipcMain.handle('17lands:refresh', async (event, setCode) => {
     assertTrustedSender(event);
-    const result = await landsData.fetchColorPairData(
-      sanitizeSetCode(setCode),
-      sanitizeFormat(format),
-      sanitizeColorPair(colorPair),
-      { send: broadcastToAll }
-    );
+    const sc = sanitizeSetCode(setCode);
+    const result = await landsData.fetchSetData(sc, 'PremierDraft', { send: broadcastToAll }, { force: true });
+    await landsData.fetchColorRatings(sc, { force: true }).catch(() => {});
+    assistantManager.reloadSetMetrics(sc);
     return result;
   });
 
-  ipcMain.handle('17lands:clear-cache', (event, setCode, format) => {
+  ipcMain.handle('17lands:clear-cache', (event, setCode) => {
     assertTrustedSender(event);
     const safeSetCode = setCode == null || setCode === '' ? null : sanitizeSetCode(setCode);
-    const safeFormat = format == null || format === '' ? null : sanitizeFormat(format);
-    landsData.clearCache(safeSetCode, safeFormat);
+    landsData.clearCache(safeSetCode);
     return { ok: true };
   });
 
@@ -404,21 +501,32 @@ function registerShortcuts() {
   const s = settings.get();
   const { hotkey_toggle, hotkey_interact } = s.general;
 
+  globalShortcut.unregisterAll();
+
+  // globalShortcut.register() returns false (it doesn't throw) when another
+  // app already owns the combination — previously that failed silently and
+  // left the overlay impossible to unlock from the keyboard.
   const tryRegister = (key, fn) => {
-    if (!key) return;
+    if (!key) return null;
+    let ok = false;
     try {
-      globalShortcut.register(key, fn);
-    } catch {
-      console.warn('[main] Could not register hotkey:', key);
+      ok = globalShortcut.register(key, fn);
+    } catch (e) {
+      appLogger.log('main', 'warn', `Invalid hotkey "${key}"`, e.message);
     }
+    if (!ok) appLogger.log('main', 'warn', `Could not register hotkey "${key}" (in use by another app?)`);
+    return { key, ok };
   };
 
-  tryRegister(hotkey_toggle, () => {
+  hotkeyStatus.toggle = tryRegister(hotkey_toggle, () => {
     if (!overlayWindow) return;
-    overlayWindow.isVisible() ? overlayWindow.hide() : overlayWindow.show();
+    const nowVisible = !overlayWindow.isVisible();
+    nowVisible ? showOverlay() : hideOverlay();
+    broadcastToAll('overlay-visibility-changed', nowVisible);
   });
 
-  tryRegister(hotkey_interact, () => setClickThrough(isInteractable));
+  hotkeyStatus.interact = tryRegister(hotkey_interact, toggleOverlayLock);
+  sendToWindows('hotkeys-status', hotkeyStatus);
 }
 
 // ─── Auto updater ────────────────────────────────────────────────────────────
@@ -488,9 +596,20 @@ function registerUpdateIPC() {
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
+app.on('second-instance', () => {
+  // Someone launched the app again — surface the running copy instead.
+  controlWindowModule.showControlWindow();
+});
+
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;
   appLogger.init();
   appLogger.log('main', 'info', 'App starting', { isDev, version: app.getVersion() });
+
+  // Every 17Lands fetch reports its status to all windows, and human-draft
+  // packs that never named their set can be recognised from cached card IDs.
+  landsData.setStatusSink(broadcastToAll);
+  require('./logParser').setSetCodeResolver(landsData.inferSetFromGrpIds);
 
   createOverlayWindow();
   assistantManager.init(sendToWindows);
@@ -498,7 +617,12 @@ app.whenReady().then(() => {
   registerIPC();
   registerUpdateIPC();
   registerShortcuts();
-  tray.create(overlayWindow, controlWindow);
+  tray.create(overlayWindow, controlWindow, {
+    toggleLock: toggleOverlayLock,
+    showOverlay,
+    hideOverlay,
+    onVisibilityChanged: (v) => broadcastToAll('overlay-visibility-changed', v),
+  });
 
   // Start log watcher once overlay is loaded
   overlayWindow.webContents.once('did-finish-load', () => {

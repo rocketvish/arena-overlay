@@ -11,34 +11,12 @@
 
 'use strict';
 
-// ── Shim: make appLogger safe for CLI (no Electron app.getPath) ──────────────
-// These modules use require('electron') at call time, so we patch global
-// before requiring them.
-process.env.ARENA_OVERLAY_TEST = '1';
-
-// Fake minimal electron module so imports don't crash
-const Module = require('module');
-const _originalLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  if (request === 'electron') {
-    return {
-      app: {
-        getPath: (name) => {
-          const os = require('os');
-          const p  = require('path');
-          const base = p.join(os.homedir(), 'AppData', 'Roaming', 'arena-overlay');
-          const map = { userData: base, logs: p.join(base, 'logs') };
-          return map[name] ?? base;
-        },
-        isPackaged: false,
-      },
-      ipcMain: { handle: () => {}, on: () => {} },
-      ipcRenderer: { invoke: () => Promise.resolve(null), on: () => {}, send: () => {}, removeListener: () => {} },
-      contextBridge: { exposeInMainWorld: () => {} },
-    };
-  }
-  return _originalLoad.apply(this, arguments);
-};
+// Make main-process modules loadable outside Electron. This dev tool reads and
+// writes the real app cache (the same files the app uses) unless
+// ARENA_OVERLAY_USERDATA points elsewhere.
+process.env.ARENA_OVERLAY_USERDATA = process.env.ARENA_OVERLAY_USERDATA
+  ?? require('path').join(require('os').homedir(), 'AppData', 'Roaming', 'arena-overlay');
+require('./lib/electronShim');
 
 const fs   = require('fs');
 const path = require('path');
@@ -49,6 +27,7 @@ const logParser      = require('../src/main/logParser');
 const landsData      = require('../src/main/17landsData');
 const signalAnalyzer = require('../src/main/signalAnalyzer');
 const draftTracker   = require('../src/main/draftTracker');
+const { splitLogChunk } = require('../src/main/logWatcher');
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
 const RESET  = '\x1b[0m';
@@ -123,9 +102,9 @@ function getLogPath() {
 
 // ── Log parsing ───────────────────────────────────────────────────────────────
 function extractDraftEvents(logContent) {
-  // Strip trailing \r so the parser's `(\{.+)$` regex can match — the live
-  // app's line iterator already does this; only this test script reads raw.
-  const lines = logContent.split('\n').map(l => l.replace(/\r$/, ''));
+  // Same line splitting as the live watcher (Player.log is CRLF).
+  const { lines, carry } = splitLogChunk('', logContent);
+  if (carry) lines.push(carry);
   const events = [];
   const collector = (ch, data) => events.push({ channel: ch, data: JSON.parse(JSON.stringify(data)) });
 
@@ -185,11 +164,12 @@ function enrichCard(rawCard, landsMap) {
     color:      lands?.color ?? scry.colorIdentity ?? '',
     rarity:     lands?.rarity ?? scry.rarity ?? 'common',
     cmc:        lands?.cmc ?? scry.cmc ?? null,
-    typeLine:   scry.typeLine ?? '',
-    oracleText: scry.oracleText ?? '',
+    typeLine:   lands?.typeLine || scry.typeLine || '',
+    oracleText: lands?.oracleText || scry.oracleText || '',
     stats:      lands?.stats ?? null,
     _matched:   lands != null,
     _hasStats:  lands?.stats?.gihwr != null || lands?.stats?.grade != null,
+    _estimated: !!lands?.stats?.gradeEstimated,
   };
 }
 
@@ -220,7 +200,7 @@ function printPackReport(packEvents, landsMap, trackerState, assistantSettings, 
 
     // Compute recommendation at this pick
     const ts    = draftTracker.getState();
-    const anal  = signalAnalyzer.analyze(ts, enriched, pickNumber, assistantSettings);
+    const anal  = signalAnalyzer.analyze(ts, enriched, { packNumber, pickNumber, packSize: packEvent.data.packSize }, assistantSettings);
     const rec   = anal.recommendation;
 
     // Print card table
@@ -237,7 +217,9 @@ function printPackReport(packEvents, landsMap, trackerState, assistantSettings, 
       const isPicked  = pickedId === card.grpId;
       const grade     = card.stats?.grade ?? null;
       const gihwr     = card.stats?.gihwr;
-      const gihStr    = gihwr != null ? `${(gihwr * 100).toFixed(1)}%` : (card._hasStats ? dim('  —  ') : dim('N/A  '));
+      const gihStr    = gihwr != null ? `${(gihwr * 100).toFixed(1)}%`
+        : card._estimated ? dim(`~${(card.stats.gihwrEst ?? card.stats.gpwr) * 100 | 0}%e`)
+        : (card._hasStats ? dim('  —  ') : dim('N/A  '));
       const nameStr   = card.name ?? color(RED, `#${card.grpId}`);
       const prefix    = isRec ? color(GREEN, '★') : (isPicked ? color(CYAN, '→') : ' ');
       const suffix    = isPicked ? color(CYAN, ' ← PICKED') : (isRec ? color(GREEN, ' ← REC') : '');
@@ -264,7 +246,7 @@ function printPackReport(packEvents, landsMap, trackerState, assistantSettings, 
 
     // Recommendation — show multi-option picks if available (Section 3)
     if (rec?.picks && rec.picks.length > 0) {
-      const ICONS = { safe: color(BLUE, '★ SAFE  '), upside: color(YELLOW, '⚡ UPSIDE'), need: color(ORANGE, '🔧 NEED  '), clear: color(GREEN, '★ CLEAR ') };
+      const ICONS = { safe: color(BLUE, '★ SAFE  '), upside: color(YELLOW, '⚡ UPSIDE'), need: color(ORANGE, '🔧 NEED  '), clear: color(GREEN, '★ CLEAR '), wheel: color(MAGENTA, '⟲ WHEEL ') };
       for (const p of rec.picks) {
         const tag = ICONS[p.kind] ?? '  ';
         const name = p.card?.name ?? `#${p.card?.grpId}`;
@@ -451,7 +433,13 @@ async function main() {
   const { map: landsMap, data: landsCards } = await buildLandsMap(setCode, format);
 
   // Compute set metrics for signal baseline
-  const setMetrics = signalAnalyzer.computeSetMetrics(landsCards);
+  const ratings = await landsData.fetchColorRatings(setCode).catch(() => null);
+  const setMetrics = signalAnalyzer.computeSetMetrics(landsCards, ratings);
+  if (setMetrics.pairs) {
+    const top = Object.entries(setMetrics.pairs).sort((a, b) => b[1].wr - a[1].wr).slice(0, 3)
+      .map(([p, v]) => `${p} ${(v.wr * 100).toFixed(1)}% (${v.cohort})`).join(', ');
+    console.log(`  Best archetypes: ${top}`);
+  }
   console.log(`  Set avg GIH%: ${setMetrics.meanGihwr > 0 ? `${(setMetrics.meanGihwr*100).toFixed(1)}%` : 'N/A'}  Total cards: ${setMetrics.totalCards}`);
 
   // Init tracker
@@ -470,7 +458,10 @@ async function main() {
   printPackReport(packEvents, landsMap, draftTracker.getState(), assistantSettings, pickEvents);
 
   // ── Final analysis ─────────────────────────────────────────────────────────
-  const finalState = signalAnalyzer.analyze(draftTracker.getState(), null, pickEvents.length, assistantSettings);
+  const lastPack = packEvents[packEvents.length - 1]?.data ?? {};
+  const finalState = signalAnalyzer.analyze(draftTracker.getState(), null,
+    { packNumber: lastPack.packNumber ?? 0, pickNumber: lastPack.pickNumber ?? 0, packSize: lastPack.packSize },
+    assistantSettings);
 
   printColorSignals(finalState.colorSignals);
   printDeckAnalysis(

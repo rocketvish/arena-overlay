@@ -15,7 +15,7 @@ const NAV_TABS = [
 
 export default function ControlApp() {
   const { settings, setSetting, loading: settingsLoading } = useSettings();
-  const { draftState, reEnrichWithColorPair } = useDraftState(settings);
+  const { draftState, refreshLandsData } = useDraftState();
   const assistantState = useAssistantState();
 
   const [activeTab, setActiveTab] = useState('draft');
@@ -23,6 +23,7 @@ export default function ControlApp() {
   const [watcherRunning, setWatcherRunning] = useState(true);
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [overlayInteractable, setOverlayInteractable] = useState(false);
+  const [hotkeys, setHotkeys] = useState(null);
   const [updateInfo, setUpdateInfo] = useState(null);  // { version, downloaded }
   const [version, setVersion] = useState('0.5.0');
   const [replayActive, setReplayActive] = useState(false);
@@ -35,13 +36,21 @@ export default function ControlApp() {
     window.electronAPI.getAppVersion?.().then((v) => { if (v) setVersion(v); });
     window.electronAPI.getWatcherStatus?.().then((s) => { if (s) setWatcherRunning(s.running); });
     window.electronAPI.getOverlayVisible?.().then((v) => setOverlayVisible(v));
+    window.electronAPI.getOverlayLocked?.().then((locked) => setOverlayInteractable(!locked));
+    window.electronAPI.getHotkeyStatus?.().then(setHotkeys);
 
     const unsubs = [
-      window.electronAPI.onStatusUpdate(setStatus),
+      window.electronAPI.onStatusUpdate((s) => {
+        setStatus(s);
+        // The watcher can start after this window first asked for its status.
+        if (s === 'stopped') setWatcherRunning(false);
+        else if (s === 'watching' || s === 'arena-detected' || s === 'log-stale') setWatcherRunning(true);
+      }),
       window.electronAPI.onUpdateAvailable?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: false }))),
       window.electronAPI.onUpdateDownloaded?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: true }))),
       window.electronAPI.onOverlayVisibilityChanged?.((v) => setOverlayVisible(v)),
       window.electronAPI.onInteractableChanged?.(setOverlayInteractable),
+      window.electronAPI.onHotkeysStatus?.(setHotkeys),
     ].filter(Boolean);
 
     return () => unsubs.forEach((fn) => fn());
@@ -111,7 +120,7 @@ export default function ControlApp() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d0d1a', color: '#e0e0e0' }}>
-      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} isInteractable={overlayInteractable} />
+      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} isInteractable={overlayInteractable} interactHotkey={hotkeys?.interact} />
 
       {updateInfo && (
         <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.18)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -232,7 +241,7 @@ export default function ControlApp() {
             assistantState={assistantState}
             settings={settings}
             onSet={setSetting}
-            reEnrichWithColorPair={reEnrichWithColorPair}
+            onRefreshData={refreshLandsData}
           />
         )}
         {activeTab === 'assistant' && (
