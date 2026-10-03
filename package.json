@@ -35,8 +35,7 @@
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico",
-      "signingHashAlgorithms": null,
-      "forceCodeSigning": true
+      "forceCodeSigning": false
     },
     "nsis": {
       "oneClick": false,
