@@ -34,6 +34,17 @@ node scripts/tune-weights.js --no-model --set HOB <table> <eval> --set EOE <tabl
 player actually made. Tune on one set, check the printed test halves of the others,
 then copy the printed weights into `WEIGHTS_MODEL` / `WEIGHTS_BASE` in `signalAnalyzer.js`.
 
+## Automatic updates
+
+`.github/workflows/set-data.yml` runs daily: `update-sets.js` checks the 8 newest expansions,
+compares 17Lands' dataset dates with the published tables, rebuilds what's new or changed and
+publishes. Run it by hand from the Actions tab (optionally with set codes / force), or locally:
+
+```sh
+node tools/pipeline/update-sets.js --dry-run      # what would change
+node tools/pipeline/update-sets.js FRA            # build + publish if the data exists
+```
+
 ## Publish
 
 ```sh

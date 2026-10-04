@@ -1,0 +1,43 @@
+# Rebuilds the per-set tables (tools/pipeline) when 17Lands publishes new or
+# updated public datasets, and uploads them to the `set-data` pre-release
+# that the overlay downloads from. New sets get their table within a day of
+# 17Lands releasing the data (~2–3 weeks after the set launches).
+name: Set data
+
+on:
+  schedule:
+    - cron: '17 9 * * *'   # daily, 09:17 UTC
+  workflow_dispatch:
+    inputs:
+      sets:
+        description: 'Set codes (space-separated); empty = the 8 newest'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if the datasets are unchanged'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # upload release assets
+
+concurrency:
+  group: set-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The pipeline uses only Node built-ins — no npm install needed.
+      - name: Build and publish changed set tables
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DATASET_CACHE: ${{ runner.temp }}/datasets
+        run: |
+          node tools/pipeline/update-sets.js ${{ inputs.force && '--force' || '' }} ${{ inputs.sets }}

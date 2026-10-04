@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"vite\" \"wait-on tcp:5173 && cross-env ELECTRON_ENV=development node scripts/start-electron.js\"",
     "build": "vite build",
     "package": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
-    "release": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish=always",
+    "release": "node scripts/release.js",
     "preview": "vite preview",
     "test:draft": "node scripts/test-draft.js",
     "test": "node scripts/test-parser.js && node scripts/test-analyzer.js && node scripts/test-deckbuilder.js && node scripts/test-game.js"
