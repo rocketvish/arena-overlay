@@ -37,6 +37,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Scryfall ─────────────────────────────────────────────────────────────
   resolveArenaIds: (grpIds) => ipcRenderer.invoke('scryfall:resolve-ids', grpIds),
 
+  // ── Saved drafts ─────────────────────────────────────────────────────────
+  listDrafts: () => ipcRenderer.invoke('drafts:list'),
+  getDraft: (file) => ipcRenderer.invoke('drafts:get', file),
+
   // ── App info ─────────────────────────────────────────────────────────────
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
 

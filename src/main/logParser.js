@@ -251,7 +251,7 @@ function parseLine(rawLine, broadcast) {
     const endpoint = resMatch[1];
     appLogger.log('parser', 'debug', `<== ${endpoint}`);
 
-    if (isDraftEndpoint(endpoint)) {
+    if (isDraftEndpoint(endpoint) || COURSE_ENDPOINTS.test(endpoint)) {
       pendingEndpoint = endpoint;
       pendingBuffer   = '';
     } else {
@@ -346,6 +346,29 @@ function tryHandleRequest(endpoint, raw) {
   }
 }
 
+// ─── Sealed pools ─────────────────────────────────────────────────────────────
+
+// Responses that describe event "courses" — a Sealed course carries the whole
+// card pool: {"Course":{"InternalEventName":"…Sealed…","CurrentModule":"DeckSelect","CardPool":[ids…]}}
+const COURSE_ENDPOINTS = /^(Event_?Join|EventGetCoursesV2|Event_GetCourses)$/;
+const emittedPools = new Set(); // courseId:poolSize already announced
+
+function handleCourses(outer) {
+  const courses = outer.Courses ?? (outer.Course ? [outer.Course] : []);
+  for (const c of courses) {
+    const name = c.InternalEventName ?? '';
+    const pool = Array.isArray(c.CardPool) ? c.CardPool.map(Number).filter(Number.isFinite) : [];
+    // Only while building — finished events stay in the course list for days.
+    if (!/Sealed/i.test(name) || pool.length < 40 || c.CurrentModule !== 'DeckSelect') continue;
+    const key = `${c.CourseId}:${pool.length}`;
+    if (emittedPools.has(key)) continue;
+    emittedPools.add(key);
+    const { setCode } = extractEventInfo(name);
+    appLogger.log('parser', 'info', `sealed-pool ${name} cards=${pool.length}`);
+    emit('sealed-pool', { eventName: name, setCode, courseId: c.CourseId, cards: pool.map(grpId => ({ grpId })) });
+  }
+}
+
 // ─── Response handler (<== body, both formats) ───────────────────────────────
 
 function tryHandleResponse(endpoint, raw) {
@@ -353,6 +376,11 @@ function tryHandleResponse(endpoint, raw) {
   try { outer = JSON.parse(raw); } catch (e) {
     appLogger.log('parser', 'warn', `JSON parse failed for ${endpoint}`, e.message);
     console.warn(`[parser] JSON parse failed for ${endpoint}:`, e.message);
+    return;
+  }
+
+  if (COURSE_ENDPOINTS.test(endpoint)) {
+    handleCourses(outer);
     return;
   }
 

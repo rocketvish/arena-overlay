@@ -107,10 +107,11 @@ test('P1p1 takes the best card regardless of color', () => {
 });
 
 test('card quality is not swamped by color fit (scale bug)', () => {
-  // Committed W/U after 8 picks. Off-color A (Card 58, B) vs in-color C- (Card 20, W) in mid pack 1.
-  const picks = ['Card 55', 'Card 51', 'Card 45', 'Card 41', 'Card 35', 'Card 31', 'Card 25', 'Card 21']
+  // The v0.5 scorer took an in-color D+ over an off-color bomb at P1p7. Six
+  // W/U picks; off-color A (Card 57, R) vs in-color F/D (Card 5, W).
+  const picks = ['Card 55', 'Card 51', 'Card 45', 'Card 41', 'Card 35', 'Card 31']
     .map(n => pick(byName[n])); // colors alternate W,U (index%5 ∈ {0,1})
-  const a = sa.analyze(tracker({ pickHistory: picks }), asPack('Card 20', 'Card 57'), { packNumber: 0, pickNumber: 8, packSize: 14 }, {});
+  const a = sa.analyze(tracker({ pickHistory: picks }), asPack('Card 5', 'Card 57'), { packNumber: 0, pickNumber: 6, packSize: 14 }, {});
   assert.strictEqual(a.recommendation.primary.name, 'Card 57', JSON.stringify(a.recommendation.ranking));
 });
 
@@ -181,6 +182,61 @@ test('archetype win rates never mix player cohorts across pairs', () => {
   assert.strictEqual(m.pairs.WU.cohort, 'all');
   assert.strictEqual(m.pairs.WU.wr, 0.60);
   assert.strictEqual(m.pairs.WR.wr, 0.52);
+});
+
+console.log('\nSet tables (public-dataset derived)');
+const setData = require('../src/main/setData');
+
+// Tiny table: two cards, 2-d model where card 1 fits pools of card 3.
+const table = {
+  cards: {
+    1: { name: 'A', gih: 0.60, pairs: { WU: [0.66, 300] }, wheel: [0.1, 0.2, 0.4, 0.6, 0.8, 0.9] },
+    2: { name: 'B', gih: 0.58, pairs: {}, wheel: [0, 0, 0, 0, 0, 0] },
+  },
+  model: { dim: 2, ids: [1, 2, 3], b: [0, 0.5, 0], u: [2, 0, 0, 0, 0, 0], v: [0, 0, 0, 0, 1, 0] },
+};
+table.modelIndex = new Map(table.model.ids.map((id, i) => [id, i]));
+
+test('model prefers the card that fits the pool', () => {
+  const empty = setData.modelScores(table, [], [1, 2]);
+  assert.ok(empty.get(2) > empty.get(1), 'without a pool, the higher-bias card wins');
+  const fit = setData.modelScores(table, [3, 3], [1, 2]);
+  assert.ok(fit.get(1) > fit.get(2), 'with card 3 in the pool, card 1 wins');
+  assert.ok(Math.abs(fit.get(1) + fit.get(2) - 1) < 1e-9);
+});
+
+test('per-pair GIH WR is shrunk toward the overall rate', () => {
+  const pg = setData.pairGih(table, 1, 'WU');
+  assert.ok(pg.gih > 0.60 && pg.gih < 0.66, `shrunk ${pg.gih}`);
+  assert.strictEqual(setData.pairGih(table, 2, 'WU').shrunk, true);
+});
+
+test('measured wheel rates are used when present', () => {
+  const w = sa.wheelInfo({ grpId: 1, stats: { alsa: 2 } }, { pickNumber: 3, packSize: 14 }, 11, table);
+  assert.strictEqual(w.prob, 0.6);
+  assert.strictEqual(w.measured, true);
+  const fallback = sa.wheelInfo({ grpId: 99, stats: { alsa: 6 } }, { pickNumber: 0, packSize: 14 }, 14, table);
+  assert.ok(Math.abs(fallback.prob - 0.5) < 0.01, `ALSA 6 at pick 1 ≈ 50% (Sierkovitz), got ${fallback.prob}`);
+});
+
+test('wheel report lists what the table took from a returning pack', () => {
+  const mk = (id, color) => ({ grpId: id, name: `C${id}`, color, stats: null });
+  const first = [mk(1, 'W'), mk(2, 'U'), mk(3, 'B'), mk(4, 'B'), mk(5, 'R'), mk(6, 'G'), mk(7, 'W'), mk(8, 'U'), mk(9, 'B'), mk(10, 'R'), mk(10, 'R')];
+  const back = [mk(9, 'B'), mk(10, 'R')];
+  const a = sa.analyze(tracker({
+    packHistory: [{ packNumber: 0, pickNumber: 0, cards: first }, { packNumber: 0, pickNumber: 8, cards: back }],
+    pickHistory: [{ ...mk(1, 'W'), packNumber: 0, pickNumber: 0 }],
+  }), back, { packNumber: 0, pickNumber: 8, packSize: 14 }, {});
+  assert.strictEqual(a.wheelReport.taken.length, 8);           // 11 cards − my pick − 2 still here
+  assert.strictEqual(a.wheelReport.colorCounts.B, 2);
+  assert.strictEqual(a.wheelReport.colorCounts.R, 2);           // card 5 and one copy of card 10; the other copy is still here
+});
+
+test('playables count cards you would play in your colors', () => {
+  const picks = ['Card 55', 'Card 50', 'Card 45', 'Card 51', 'Card 46', 'Card 0'].map(n => ({ ...pick(byName[n]), typeLine: 'Creature' }));
+  const a = sa.analyze(tracker({ pickHistory: picks }), null, { packNumber: 0, pickNumber: 6, packSize: 14 }, {});
+  assert.strictEqual(a.playables.colors, 'WU');
+  assert.strictEqual(a.playables.playables, 5);                // Card 0 (F) isn't playable
 });
 
 console.log(failures ? `\n${failures} test(s) failed\n` : '\nAll analyzer tests passed\n');

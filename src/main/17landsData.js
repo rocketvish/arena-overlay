@@ -40,6 +40,10 @@ const THIN_RESPONSE_RATIO = 0.5;               // fresh data with < 50% of cache
 const STALE_RETRY_MS = 60 * 60 * 1000;         // re-check a stale fallback at most hourly
 const FAILURE_RETRY_MS = 5 * 60 * 1000;        // don't re-request after an error / no-data for 5 min
 const RECENT_SNAPSHOT_MS = 7 * 24 * 60 * 60 * 1000; // thin-response guard only trusts snapshots this fresh
+// Below this many card-games in total a set's data can't grade anything — e.g.
+// a set that has left the live queue still returns a trickle (SOS: 192).
+// Treated like "no data" so a better source (public dataset, older snapshot) wins.
+const MIN_USEFUL_GAMES = 20000;
 const USER_AGENT = 'ArenaOverlay (github.com/rocketvish/arena-overlay)';
 
 // Memory cache: cacheKey → { cards, fetchedAt, stale? }
@@ -425,7 +429,8 @@ async function fetchSetData(setCode, _format = 'PremierDraft', win = null, { for
     if (isFresh(mem)) return result(mem, true);
     if (mem?.stale && Date.now() - mem.checkedAt < STALE_RETRY_MS) return result(mem, true);
     const disk = readCacheEntry(key);
-    if (isFresh(disk)) {
+    // v0.6.0 could cache a near-empty response as if it were real data.
+    if (isFresh(disk) && (disk.thinAccepted || totalGames(disk.cards) >= MIN_USEFUL_GAMES)) {
       memCache.set(key, disk);
       return result(disk, true);
     }
@@ -497,8 +502,18 @@ async function refreshSetData(setCode, key, win) {
   // has most likely left 17Lands' live window, so keep the richer snapshot.
   // Only snapshots under a week old count, so one thin response can't pin the
   // overlay to old numbers forever.
-  const recentSnapshot = current && Date.now() - current.fetchedAt < RECENT_SNAPSHOT_MS;
-  if (games === 0 || (recentSnapshot && games < totalGames(current.cards) * THIN_RESPONSE_RATIO)) {
+  const recentSnapshot = current && Date.now() - current.fetchedAt < RECENT_SNAPSHOT_MS && totalGames(current.cards) >= MIN_USEFUL_GAMES;
+  if (games < MIN_USEFUL_GAMES || (recentSnapshot && games < totalGames(current.cards) * THIN_RESPONSE_RATIO)) {
+    // A recent snapshot of our own beats everything; next best is the set's
+    // full-format stats from 17Lands' public dataset; old v0.5 caches last.
+    if (!recentSnapshot) {
+      const pub = await fromPublicDataset(setCode);
+      if (pub) {
+        memCache.set(key, { ...pub, stale: true, checkedAt: Date.now() });
+        sendStatus(win, { status: 'loaded', setCode, count: pub.cards.length, fetchedAt: pub.fetchedAt, stale: true, staleReason: pub.staleReason });
+        return result({ ...pub, stale: true }, true);
+      }
+    }
     const fb = await fallback('17Lands is no longer serving recent data for this set');
     if (fb) return fb;
     if (games === 0) {
@@ -510,11 +525,37 @@ async function refreshSetData(setCode, key, win) {
 
   await attachCardText(setCode, cards);
 
-  const entry = { fetchedAt: Date.now(), cards };
+  // thinAccepted: a small sample kept on purpose (nothing better existed), so
+  // the startup check below doesn't keep re-fetching it.
+  const entry = { fetchedAt: Date.now(), cards, thinAccepted: games < MIN_USEFUL_GAMES };
   writeCacheEntry(key, entry);
   memCache.set(key, entry);
   sendStatus(win, { status: 'loaded', setCode, count: cards.length, fetchedAt: entry.fetchedAt });
   return result(entry, false);
+}
+
+/**
+ * Card stats rebuilt from the per-set table derived from 17Lands' public
+ * datasets (whole-format numbers), for sets the live endpoint has dropped.
+ */
+async function fromPublicDataset(setCode) {
+  try {
+    const setData = require('./setData'); // lazy: setData is optional at startup
+    const table = await setData.loadSetTable(setCode);
+    if (!table?.cards) return null;
+    const cards = buildCardData(setData.toRawRatings(table));
+    if (totalGames(cards) === 0) return null;
+    await attachCardText(setCode, cards);
+    const when = table.source?.gameDataModified ? new Date(table.source.gameDataModified).toLocaleDateString() : 'a recent snapshot';
+    return {
+      cards,
+      fetchedAt: table.generatedAt ? Date.parse(table.generatedAt) : Date.now(),
+      staleReason: `using 17Lands' public dataset (full format, ${when})`,
+    };
+  } catch (e) {
+    console.warn('[17lands] public dataset fallback failed:', e.message);
+    return null;
+  }
 }
 
 // ─── Public API: archetype (color pair) win rates ────────────────────────────
@@ -716,5 +757,5 @@ module.exports = {
   fetchSetData, fetchColorRatings, clearCache, resolveArenaIds, getScryfallCardData,
   inferSetFromGrpIds, setStatusSink,
   // exported for tests
-  computeGrades, buildCardData,
+  computeGrades, buildCardData, attachCardText,
 };

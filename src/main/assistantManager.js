@@ -7,7 +7,10 @@ const draftTracker   = require('./draftTracker');
 const signalAnalyzer = require('./signalAnalyzer');
 const landsData      = require('./17landsData');
 const settings       = require('./settings');
+const setData        = require('./setData');
+const deckBuilder    = require('./deckBuilder');
 const appLogger      = require('./appLogger');
+const draftLog       = require('./draftLog');
 
 let broadcastFn  = null;
 let currentState = null;
@@ -45,6 +48,7 @@ function enrichOne(grpId, landsMap) {
     color:      lands?.color ?? scryfall.colorIdentity ?? '',
     rarity:     lands?.rarity ?? scryfall.rarity ?? 'common',
     cmc:        lands?.cmc ?? scryfall.cmc ?? null,
+    manaCost:   lands?.manaCost ?? scryfall.manaCost ?? null,
     typeLine:   lands?.typeLine || scryfall.typeLine || '',
     oracleText: lands?.oracleText || scryfall.oracleText || '',
     stats:      lands?.stats ?? null,
@@ -66,19 +70,70 @@ async function loadLandsMap(setCode) {
 }
 
 /** Card stats + archetype win rates → set metrics for the analyzer. */
+/**
+ * Card stats + archetype win rates + the per-set table derived from 17Lands'
+ * public datasets (pick model, per-pair GIH WR, wheel rates) when published.
+ */
 async function loadSetMetrics(setCode) {
-  const [cards, ratings] = await Promise.all([
+  const [cards, ratings, table] = await Promise.all([
     landsData.fetchSetData(setCode).then(r => r?.data ?? null),
     landsData.fetchColorRatings(setCode).catch(() => null),
+    setData.loadSetTable(setCode).catch(() => null),
   ]);
   if (!cards) return null;
-  return signalAnalyzer.computeSetMetrics(cards, ratings);
+  // Live 17Lands archetype data first; the public-data table can stand in.
+  const metrics = signalAnalyzer.computeSetMetrics(cards, ratings ?? (table?.pairs ? { pairs: table.pairs } : null));
+  metrics.table = table;
+  return metrics;
+}
+
+/** Best 40-card builds from the current pool (shown once there's enough to build). */
+function suggestDecks(pool, metrics, { sealed = false } = {}) {
+  if (pool.length < 15) return [];
+  const pairStrength = metrics?.pairs
+    ? Object.fromEntries(Object.entries(metrics.pairs).map(([p, v]) => [p, v.delta ?? 0]))
+    : undefined;
+  const mean = metrics?.meanGihwr ?? 0.55;
+  const std = metrics?.stdGihwr ?? 0.04;
+  const table = metrics?.table;
+  // Card value inside a given pair: archetype-specific GIH WR when we have it.
+  const cardValue = (card, pair) => {
+    const pg = table ? setData.pairGih(table, card.grpId, pair) : null;
+    if (pg && !pg.shrunk) {
+      const overall = table.cards?.[card.grpId]?.gih;
+      if (card.stats?.z != null && overall != null) return card.stats.z + (pg.gih - overall) / std;
+    }
+    if (card.stats?.z != null) return card.stats.z;
+    if (card.stats?.gihwr != null) return (card.stats.gihwr - mean) / std;
+    return -0.3;
+  };
+  const opts = { cardValue, pairStrength, format: 'bo1', maxSuggestions: 3 };
+  try {
+    return sealed ? deckBuilder.buildSealed(pool, opts) : deckBuilder.buildDecks(pool, opts);
+  } catch (e) {
+    appLogger.log('assistant', 'warn', 'Deck builder failed', e.message);
+    return [];
+  }
 }
 
 function reanalyze(packCards) {
-  const state = signalAnalyzer.analyze(
-    draftTracker.getState(), packCards, currentPosition, getAssistantSettings());
+  const trackerState = draftTracker.getState();
+  const state = signalAnalyzer.analyze(trackerState, packCards, currentPosition, getAssistantSettings());
+  // Deck suggestions from the pool so far (full card objects, not the trimmed pick log).
+  state.deckSuggestions = suggestDecks(trackerState.pickHistory.map(p => p.card ?? p), trackerState.setMetrics)
+    .map(slimDeck);
   broadcast(state);
+}
+
+/** Keep IPC payloads small: decks carry names/ids, not whole card objects. */
+function slimDeck(d) {
+  const slim = (c) => ({ grpId: c.grpId, name: c.name, color: c.color, cmc: c.cmc, typeLine: c.typeLine, grade: c.stats?.grade ?? null });
+  return {
+    ...d,
+    main: d.main.map(slim),
+    nonbasicLands: (d.nonbasicLands ?? []).map(slim),
+    splash: d.splash ? { ...d.splash, cards: d.splash.cards.map(slim) } : null,
+  };
 }
 
 // Events are processed strictly in arrival order. Handlers await data loads,
@@ -174,6 +229,21 @@ async function processEvent(channel, data) {
     pendingPackCards = null;
     lastHandledPackEventId = null;
     reanalyze(null);
+    const ts = draftTracker.getState();
+    draftLog.saveDraft({
+      setCode: ts.setCode, format: ts.format, packSize: ts.packSize,
+      picks: ts.pickHistory.map(p => ({ ...p, stats: undefined, oracleText: undefined })),
+      deck: currentState?.deckSuggestions?.[0] ?? null,
+    });
+  }
+
+  else if (channel === 'sealed-pool') {
+    const { setCode, eventName, cards } = data;
+    const [metrics, landsMap] = await Promise.all([loadSetMetrics(setCode), loadLandsMap(setCode)]);
+    const pool = (cards ?? []).map(c => enrichOne(c.grpId, landsMap));
+    const decks = suggestDecks(pool, metrics, { sealed: true }).map(slimDeck);
+    appLogger.log('assistant', 'info', `Sealed pool ${eventName}: ${pool.length} cards, ${decks.length} builds`);
+    broadcast({ ...(currentState ?? signalAnalyzer.emptyState()), sealed: { eventName, setCode, poolSize: pool.length, decks, at: Date.now() } });
   }
 }
 

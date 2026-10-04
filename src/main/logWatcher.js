@@ -138,6 +138,17 @@ function initialScan(filePath) {
     }
   }
 
+  // A Sealed pool being built right now lives in the latest course listing.
+  if (broadcastFn) {
+    for (let i = lines.length - 1; i > latestPackLine; i--) {
+      if (/^<==\s*(EventGetCoursesV2|Event_?Join)\b/.test(lines[i])) {
+        logParser.parseLine(lines[i], broadcastFn);
+        if (lines[i + 1]) logParser.parseLine(lines[i + 1], broadcastFn);
+        break;
+      }
+    }
+  }
+
   if (latestPackLine === -1) {
     console.log('[logWatcher] No draft pack events found in log during initial scan');
     return;

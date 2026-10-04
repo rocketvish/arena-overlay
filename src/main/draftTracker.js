@@ -53,6 +53,7 @@ function recordPackSeen({ packNumber, pickNumber, cards }) {
  */
 function recordPick({ packNumber, pickNumber, grpId, enrichedCard, recommendation }) {
   const recName = recommendation?.primary?.name ?? null;
+  const recId = recommendation?.primary?.grpId ?? null;
   const pickedName = enrichedCard?.name ?? `#${grpId}`;
   const alignedWithRec = !recName || pickedName === recName;
 
@@ -68,10 +69,14 @@ function recordPick({ packNumber, pickNumber, grpId, enrichedCard, recommendatio
     color: enrichedCard?.color ?? '',
     rarity: enrichedCard?.rarity ?? null,
     cmc: enrichedCard?.cmc ?? null,
+    manaCost: enrichedCard?.manaCost ?? null,
     typeLine: enrichedCard?.typeLine ?? '',
     oracleText: enrichedCard?.oracleText ?? '',
     recommendation: recName,
-    alignedWithRec,
+    recommendedGrpId: recId,
+    alignedWithRec: recId != null ? recId === grpId : alignedWithRec,
+    // What the assistant showed, for the post-draft review.
+    options: (recommendation?.picks ?? []).map(p => ({ kind: p.kind, name: p.card?.name, grpId: p.card?.grpId, reason: p.reason })),
   });
 }
 

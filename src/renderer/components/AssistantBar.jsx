@@ -125,6 +125,34 @@ function InsightLine({ insight }) {
   );
 }
 
+// ── This pack wheeled: what the table took from it ───────────────────────────
+function WheelLine({ report }) {
+  const tally = Object.entries(report.colorCounts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  return (
+    <div title={report.taken.map((t) => `${t.name}${t.grade ? ` (${t.grade})` : ''}`).join('\n')}
+         style={{ fontSize: 10, color: '#b0a0e0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      ⟲ Since pick {report.fromPick} the table took {report.taken.length}:{' '}
+      {tally.map(([c, n]) => <span key={c} style={{ color: COLOR_HEX[c], fontWeight: 700, marginRight: 4 }}>{c}{n}</span>)}
+    </div>
+  );
+}
+
+// ── Playables toward a 23-spell deck in your current colors ─────────────────
+function PlayablesLine({ p }) {
+  const pct = Math.min(1, p.playables / p.target);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: '#999' }}
+         title="Cards you'd play in your current colors (about D+ or better). A deck needs 23; aim for 15–17 creatures and 4–6 two-drops.">
+      <span>Playables in {[...p.colors].map((c) => <span key={c} style={{ color: COLOR_HEX[c], fontWeight: 700 }}>{c}</span>)}</span>
+      <div style={{ flex: 1, height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ width: `${pct * 100}%`, height: '100%', background: pct >= 1 ? '#50c87a' : '#6a8acc' }} />
+      </div>
+      <span style={{ fontFamily: 'monospace' }}>{p.playables}/{p.target}</span>
+      <span style={{ color: '#666' }}>{p.creatures} creatures</span>
+    </div>
+  );
+}
+
 // ── Assistant section (bottom of overlay) ─────────────────────────────────────
 // Section 6B: visually distinct from the card list above, with a header,
 // a divider, and a collapse toggle.
@@ -168,6 +196,12 @@ export default function AssistantBar({ assistantState, settings, inDraft }) {
         }}>
           Assistant
         </span>
+        {assistantState?.hasPickModel && (
+          <span title="Recommendations include a pick model trained on top 17Lands drafters' picks for this set (17Lands public datasets)"
+                style={{ marginLeft: 8, fontSize: 9, color: '#7ec8a0', border: '1px solid rgba(126,200,160,0.4)', borderRadius: 3, padding: '0 4px' }}>
+            + top-player model
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <span style={{
           fontSize: 11, color: '#9fc8ff', fontWeight: 700,
@@ -192,7 +226,9 @@ export default function AssistantBar({ assistantState, settings, inDraft }) {
           {showRec && picks && picks.length > 0
             ? <PicksList picks={picks} />
             : (showRec && recommendation && <RecLine recommendation={recommendation} />)}
+          {assistantState?.wheelReport?.taken?.length > 0 && <WheelLine report={assistantState.wheelReport} />}
           {insights.length > 0 && <InsightLine insight={insights[0]} />}
+          {assistantState?.playables?.colors && <PlayablesLine p={assistantState.playables} />}
           {deckNeeds.length > 0 && <NeedsLine deckNeeds={deckNeeds} />}
         </div>
       )}

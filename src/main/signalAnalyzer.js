@@ -22,6 +22,8 @@
 const synergyDetector    = require('./analysis/synergyDetector');
 const archetypeDetector  = require('./analysis/archetypeDetector');
 const winConditionAnalyzer = require('./analysis/winConditionAnalyzer');
+// Lookups into the per-set tables derived from 17Lands' public datasets.
+const setDataLookups = require('./setData');
 
 const COLORS = ['W', 'U', 'B', 'R', 'G'];
 const POD_SIZE = 8;                 // drafters per pod — a pack wheels after 8 picks
@@ -194,7 +196,10 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
   for (const pack of packHistory) {
     if (pack.pickNumber < 1) continue;
     informativePacks++;
-    const weight = pack.packNumber === lastPack ? 1 : 0.6;
+    // Picks ~4–9 are when neighbours have settled; picks 2–3 say little
+    // (the drafter upstream may simply have had a better card).
+    const pickWeight = pack.pickNumber <= 2 ? TUNE.earlySignalWeight : pack.pickNumber <= 8 ? 1 : 0.6;
+    const weight = (pack.packNumber === lastPack ? 1 : 0.6) * pickWeight;
     for (const card of pack.cards ?? []) {
       const l = lateness(card, pack.pickNumber, setMetrics);
       if (l <= 0) continue;
@@ -517,17 +522,51 @@ function computeSignalInsights(trackerState, currentPackNumber, currentPickNumbe
 
 // ─── Card Scoring ─────────────────────────────────────────────────────────────
 
-// Component weights per draft phase. Each row sums to 1.
-//   quality: card strength   colorFit: matches your colors
-//   needs: fills a deck hole openness: color is flowing
-//   archetype: strong 2-color pair in the current format
-const WEIGHTS = {
-  early:          { quality: 0.75, colorFit: 0.08, needs: 0.00, openness: 0.12, archetype: 0.05 },
-  'mid-balanced': { quality: 0.52, colorFit: 0.24, needs: 0.08, openness: 0.10, archetype: 0.06 },
-  'mid-best-card':{ quality: 0.66, colorFit: 0.16, needs: 0.06, openness: 0.07, archetype: 0.05 },
-  'mid-signals':  { quality: 0.42, colorFit: 0.20, needs: 0.08, openness: 0.24, archetype: 0.06 },
-  late:           { quality: 0.38, colorFit: 0.34, needs: 0.18, openness: 0.04, archetype: 0.06 },
+// Component weights per draft phase. Rows are normalized over the components
+// that are available (e.g. no `model` before a set's public data exists).
+//   quality: card strength (archetype-adjusted once committed)
+//   colorFit: matches your colors   needs: fills a deck hole
+//   openness: color is flowing      archetype: strong 2-color pair
+//   model: what top 17Lands drafters take from this pack given your pool
+// Two sets, both tuned with scripts/tune-weights.js against held-out
+// top-player drafts (tune on HOB, check on EOE):
+//   BASE  — before a set's public data exists (no pick model yet)
+//   MODEL — once the per-set pick model is available; it carries most of
+//           the weight, with color fit and needs still adding signal.
+// Tuning note: openness (signal reading) earned no weight in the balanced
+// style — it didn't make picks more like top players' (consistent with
+// published draft models, where pack signals add <1 point). The "signals"
+// style keeps it for people who draft that way.
+let WEIGHTS_BASE = {
+  early:          { quality: 0.188, colorFit: 0.128, needs: 0,    openness: 0,    archetype: 0.05, model: 0 },
+  'mid-balanced': { quality: 0.26,  colorFit: 0.24,  needs: 0,    openness: 0,    archetype: 0.05, model: 0 },
+  'mid-best-card':{ quality: 0.364, colorFit: 0.168, needs: 0,    openness: 0,    archetype: 0.05, model: 0 },
+  'mid-signals':  { quality: 0.26,  colorFit: 0.192, needs: 0,    openness: 0.15, archetype: 0.05, model: 0 },
+  late:           { quality: 0.19,  colorFit: 0.34,  needs: 0.18, openness: 0.04, archetype: 0.15, model: 0 },
 };
+let WEIGHTS_MODEL = {
+  early:          { quality: 0,    colorFit: 0.08, needs: 0,    openness: 0.12, archetype: 0.05, model: 0.5 },
+  'mid-balanced': { quality: 0.05, colorFit: 0.6,  needs: 0.04, openness: 0.1,  archetype: 0.06, model: 1 },
+  'mid-best-card':{ quality: 0.07, colorFit: 0.42, needs: 0.04, openness: 0.1,  archetype: 0.06, model: 1 },
+  'mid-signals':  { quality: 0.05, colorFit: 0.48, needs: 0.04, openness: 0.2,  archetype: 0.06, model: 1 },
+  late:           { quality: 0.19, colorFit: 0.34, needs: 0.18, openness: 0.04, archetype: 0.06, model: 1 },
+};
+
+/** Override / read weights (used by the tuning harness). */
+function setWeights(w, which = 'model') { if (which === 'base') WEIGHTS_BASE = w; else WEIGHTS_MODEL = w; }
+function getWeights(which = 'model') { return which === 'base' ? WEIGHTS_BASE : WEIGHTS_MODEL; }
+
+/** Colored pips by color from a mana cost like "{1}{W}{W}" (hybrid counts ½ each). */
+function pipsOf(card) {
+  const out = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+  const cost = card?.manaCost;
+  if (!cost) { for (const c of cardColorsOf(card)) out[c] += 1; return out; }
+  for (const sym of cost.match(/\{[^}]+\}/g) ?? []) {
+    const parts = sym.slice(1, -1).split('/').filter((p) => out[p] !== undefined);
+    for (const p of parts) out[p] += 1 / parts.length;
+  }
+  return out;
+}
 
 /** Position in the draft. `overall` = cards drafted before this pick. */
 function draftPosition(packNumber, pickNumber, packSize) {
@@ -547,25 +586,59 @@ function selectPhase(pos, draftStyle) {
  * Quality-weighted color commitment from the picks so far.
  * Returns { weights: {W..G}, top: [c1, c2?], commitment 0..1, secondOpen }.
  */
-function colorCommitment(pickedCards, overall, setMetrics) {
+const PAIRS = ['WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG'];
+
+/**
+ * Quality-weighted color commitment from the picks so far.
+ *
+ * Commitment grows with picks made *and* with how far the best two-color pair
+ * leads the runner-up (17Lands' draft simulations: the right amount of
+ * staying open depends on the table — commit when the lane is clear, not at
+ * a fixed pick).
+ * Returns { weights, top: [c1, c2?], pair, commitment 0..1, secondOpen, lead }.
+ */
+function colorCommitment(pickedCards, overall, setMetrics, pace = TUNE) {
   const weights = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+  const pairW = Object.fromEntries(PAIRS.map((p) => [p, 0]));
   for (const c of pickedCards) {
     const colors = cardColorsOf(c);
-    if (!colors) continue;
     const q = cardQuality(c, setMetrics);
     for (const ch of colors) weights[ch] += q / colors.length;
+    for (const p of PAIRS) if ([...colors].every((ch) => p.includes(ch))) pairW[p] += colors ? q : q * 0.5;
   }
   const ranked = COLORS.filter(c => weights[c] > 0).sort((a, b) => weights[b] - weights[a]);
   const c1 = ranked[0] ?? null;
   const c2 = ranked[1] ?? null;
   // Second color is "decided" once it carries real weight relative to the first.
   const secondOpen = !c2 || weights[c2] < 0.45 * weights[c1];
-  // Commitment ramps from nothing at P1p5 to full around P2p6.
-  const commitment = clamp01((overall - 4) / 16);
-  return { weights, top: secondOpen ? (c1 ? [c1] : []) : [c1, c2], commitment, secondOpen };
+  const pairRank = PAIRS.slice().sort((a, b) => pairW[b] - pairW[a]);
+  const lead = pairW[pairRank[0]] > 0 ? (pairW[pairRank[0]] - pairW[pairRank[1]]) / pairW[pairRank[0]] : 0;
+  const ramp = clamp01((overall - pace.commitStart) / pace.commitSpan);
+  const commitment = clamp01(ramp * (pace.commitBase + pace.commitLead * lead));
+  return {
+    weights, top: secondOpen ? (c1 ? [c1] : []) : [c1, c2],
+    pair: !secondOpen && c1 && c2 ? COLORS.filter((c) => c === c1 || c === c2).join('') : null,
+    commitment, secondOpen, lead,
+  };
 }
 
-function colorFitScore(card, commit, colorSignals) {
+// Tunable shape parameters (fitted with scripts/tune-weights.js).
+let TUNE = {
+  commitStart: 3, commitSpan: 15, commitBase: 0.7, commitLead: 1.0,
+  pipPenalty: 0.15,          // double-pip cards outside your main color fit less
+  pairQualityScale: 1.0,     // how strongly archetype-specific GIH WR adjusts quality
+  modelSharpness: 1.0,       // exponent on the model's relative pick probability
+  earlySignalWeight: 0.3,    // weight of picks 2–3 when reading signals
+  pack1OffColorFloor: 0.25,  // color fit floor for off-color cards in pack 1 (pivot window)
+};
+// Without the pick model, committing earlier matched top players better.
+let PACE_BASE = { commitStart: 0, commitSpan: 8, commitBase: 0.7, commitLead: 2 };
+function setTuning(t, which = 'model') {
+  if (which === 'base') PACE_BASE = { ...PACE_BASE, ...t };
+  TUNE = { ...TUNE, ...(which === 'base' ? {} : t) };
+}
+
+function colorFitScore(card, commit, colorSignals, pos = null) {
   const colors = cardColorsOf(card);
   if (!colors) return isLandCard(card) ? 0.5 : 0.8; // colorless spells fit any deck
   if (commit.top.length === 0) return 0.6;
@@ -574,12 +647,41 @@ function colorFitScore(card, commit, colorSignals) {
     if (commit.top.includes(ch)) return 1;
     if (commit.secondOpen) return 0.6;                       // still choosing a 2nd color
     const open = (colorSignals?.[ch]?.score ?? 50) >= 65;    // pivot room if wide open
-    return open ? 0.3 : 0;
+    // Pack 1 is still a pivot window: a strong off-color card keeps some credit.
+    const floor = pos && pos.packNumber === 0 ? TUNE.pack1OffColorFloor : 0;
+    return Math.max(open ? 0.3 : 0, floor);
   };
   const fits = colors.split('').map(fitOne);
-  const raw = (Math.min(...fits) + fits.reduce((a, b) => a + b, 0) / fits.length) / 2;
+  let raw = (Math.min(...fits) + fits.reduce((a, b) => a + b, 0) / fits.length) / 2;
+  // Heavy pips in anything but your main color are harder to cast (Karsten).
+  const pips = pipsOf(card);
+  if (COLORS.some((c) => c !== commit.top[0] && pips[c] >= 2)) raw *= 1 - TUNE.pipPenalty;
   // Blend with neutral while commitment is still forming.
   return 0.6 * (1 - commit.commitment) + raw * commit.commitment;
+}
+
+/**
+ * Card quality for *your* deck: once you lean into a pair, shift the card's
+ * z-score by how much better or worse it performs in that pair than overall
+ * (17Lands' per-archetype GIH WR from the public game data). Fixes the
+ * classic bias where gold cards and strong-archetype cards look better than
+ * they play elsewhere.
+ */
+function deckQuality(card, ctx) {
+  const base = cardQuality(card, ctx.setMetrics);
+  const table = ctx.setMetrics?.table;
+  const pair = ctx.commit?.pair;
+  if (!table || !pair || !card?.grpId) return base;
+  const colors = cardColorsOf(card);
+  if (![...colors].every((c) => pair.includes(c))) return base;
+  const pg = setDataLookups.pairGih(table, card.grpId, pair);
+  const overall = table.cards?.[card.grpId]?.gih;
+  if (!pg || overall == null || pg.shrunk) return base;
+  const z = cardZ(card, ctx.setMetrics);
+  if (z == null) return base;
+  const std = ctx.setMetrics?.stdGihwr ?? 0.04;
+  const shift = ((pg.gih - overall) / std) * TUNE.pairQualityScale * ctx.commit.commitment;
+  return normCdf(z + shift);
 }
 
 function needsScore(card, deckNeeds) {
@@ -629,33 +731,45 @@ function archetypeScore(card, commit, setMetrics) {
  */
 function scoreCard(card, ctx) {
   const phase = selectPhase(ctx.pos, ctx.draftStyle);
-  const w = WEIGHTS[phase];
+  const modelP = ctx.modelScores?.get(card.grpId);
+  const w = (ctx.modelScores ? WEIGHTS_MODEL : WEIGHTS_BASE)[phase];
   const parts = {
-    quality:   cardQuality(card, ctx.setMetrics),
-    colorFit:  colorFitScore(card, ctx.commit, ctx.colorSignals),
+    quality:   deckQuality(card, ctx),
+    colorFit:  colorFitScore(card, ctx.commit, ctx.colorSignals, ctx.pos),
     needs:     needsScore(card, ctx.deckNeeds),
     openness:  opennessScore(card, ctx.colorSignals),
     archetype: archetypeScore(card, ctx.commit, ctx.setMetrics),
+    // Relative to the model's favourite in this pack, so it lives on 0..1.
+    model:     modelP != null && ctx.modelMax > 0 ? Math.pow(modelP / ctx.modelMax, TUNE.modelSharpness) : null,
   };
-  let total = 0;
-  for (const k of Object.keys(w)) total += w[k] * parts[k];
-  return { total, parts, phase };
+  let total = 0, wSum = 0;
+  for (const k of Object.keys(w)) {
+    if (parts[k] == null || !w[k]) continue;
+    total += w[k] * parts[k];
+    wSum += w[k];
+  }
+  return { total: wSum > 0 ? total / wSum : 0, parts, phase };
 }
 
 // ─── Wheel prediction ─────────────────────────────────────────────────────────
 
 /**
- * Will this card likely come back after a lap of the table? Uses ALSA
- * (average pick at which 17Lands drafters last saw the card).
+ * Chance this card is still in the pack when it comes back after a lap of
+ * the table. Uses the per-card wheel rate measured in 17Lands' draft data
+ * when available; otherwise a curve on ALSA fitted to Sierkovitz's numbers
+ * (ALSA ≈ 4 → ~15%, 5 → ~30%, 6 → ~50% for an early-pick wheel).
  */
-function wheelInfo(card, pos, packCardCount) {
+function wheelInfo(card, pos, packCardCount, table = null) {
   const returnPick = pos.pickNumber + POD_SIZE;            // 0-based pick it would come back at
   if (packCardCount <= POD_SIZE) return null;               // this pack won't come back
+  const measured = table ? setDataLookups.wheelProb(table, card.grpId, pos.pickNumber) : null;
   const alsa = card?.stats?.alsa;
-  if (alsa == null) return null;
-  // ALSA is 1-based; we need it seen at (returnPick + 1) or later.
-  const margin = alsa - (returnPick + 1);
-  return { likely: margin >= 0, alsa, returnPick: returnPick + 1, margin };
+  let prob = measured;
+  if (prob == null) {
+    if (alsa == null) return null;
+    prob = 1 / (1 + Math.exp(-1.1 * (alsa - (returnPick + 1 - 3))));
+  }
+  return { likely: prob >= 0.5, prob, alsa, returnPick: returnPick + 1, measured: measured != null };
 }
 
 // ─── Pick options ─────────────────────────────────────────────────────────────
@@ -706,6 +820,11 @@ function buildPickOptions(scored, ctx) {
   const upside = byQuality[0]?.card ?? null;
 
   const picks = [];
+  const topModel = ctx.modelScores ? [...ctx.modelScores.entries()].sort((a, b) => b[1] - a[1])[0] : null;
+  const modelNote = (card) => {
+    const p = ctx.modelScores?.get(card.grpId);
+    return p != null ? `top 17Lands drafters take it here ~${Math.round(p * 100)}% of the time` : null;
+  };
   const safeReason = inColors
     ? `best for your ${ctx.commit.top.join('')} deck (${gradeLabel(safe)})`
     : `best overall pick (${gradeLabel(safe)})`;
@@ -713,8 +832,8 @@ function buildPickOptions(scored, ctx) {
   picks.push({
     kind: isClear ? 'clear' : 'safe',
     card: safe,
-    reason: safeReason,
-    reasonLong: [safeReason, communityNote(safe)].filter(Boolean).join(' · '),
+    reason: topModel && topModel[0] === safe.grpId ? `${safeReason} · top players' pick` : safeReason,
+    reasonLong: [safeReason, modelNote(safe), communityNote(safe)].filter(Boolean).join(' · '),
   });
 
   const upsideQualifies = upside && !isClear && gradeAtOrAbove(upside.stats?.grade, 'B+');
@@ -748,9 +867,9 @@ function buildPickOptions(scored, ctx) {
   // Wheel: if the top pick usually comes back around but the runner-up
   // doesn't, you may get both by taking the runner-up now.
   const runnerUp = scored[1];
-  if (runnerUp && safeEntry.wheel?.likely && !runnerUp.wheel?.likely &&
+  if (runnerUp && safeEntry.wheel?.likely && !(runnerUp.wheel?.prob >= 0.35) &&
       safeEntry.total - runnerUp.total < 0.06) {
-    const reason = `${safe.name} often wheels (17Lands last seen ~pick ${safeEntry.wheel.alsa.toFixed(1)}; it would return at pick ${safeEntry.wheel.returnPick}) — take ${runnerUp.card.name} now and hope to get both`;
+    const reason = `${safe.name} comes back ~${Math.round(safeEntry.wheel.prob * 100)}% of the time (at pick ${safeEntry.wheel.returnPick}${safeEntry.wheel.measured ? ', per 17Lands draft data' : ''}) — take ${runnerUp.card.name} now and you may get both`;
     picks.push({ kind: 'wheel', card: runnerUp.card, wheelCard: safe, reason, reasonLong: reason });
   }
 
@@ -765,6 +884,12 @@ function computeRecommendation(packCards, ctx, tier3) {
   const synergyByGrpId = new Map();
   for (const s of tier3?.synergies ?? []) synergyByGrpId.set(s.grpId, s);
 
+  const table = ctx.setMetrics?.table;
+  if (table) {
+    ctx.modelScores = setDataLookups.modelScores(table, ctx.pickedCards.map((c) => c.grpId), packCards.map((c) => c.grpId));
+    ctx.modelMax = ctx.modelScores ? Math.max(...ctx.modelScores.values()) : 0;
+  }
+
   const scored = packCards
     .map(card => {
       const { total, parts, phase } = scoreCard(card, ctx);
@@ -773,7 +898,7 @@ function computeRecommendation(packCards, ctx, tier3) {
       if (syn?.score) score += syn.score * 0.04;
       // Win-condition support: small nudge toward cards that protect or find a bomb
       if (tier3?.winConditions?.hasBomb && tier3.winConditions.supportPattern?.test(card.oracleText ?? '')) score += 0.015;
-      return { card, total: score, parts, phase, synergy: syn ?? null, wheel: wheelInfo(card, ctx.pos, packCards.length) };
+      return { card, total: score, parts, phase, synergy: syn ?? null, wheel: wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table) };
     })
     .sort((a, b) => b.total - a.total);
 
@@ -819,6 +944,58 @@ function computeRecommendation(packCards, ctx, tier3) {
   };
 }
 
+// ─── Wheel report: what the table took from a pack you've seen before ────────
+
+/**
+ * When a pack comes back (8 picks later), list the cards that were taken from
+ * it in between — direct evidence of what your neighbours are drafting.
+ */
+function computeWheelReport(packHistory, pickHistory, pos) {
+  if (pos.pickNumber < POD_SIZE) return null;
+  const earlierPick = pos.pickNumber - POD_SIZE;
+  const earlier = packHistory.find(p => p.packNumber === pos.packNumber && p.pickNumber === earlierPick);
+  const current = packHistory.find(p => p.packNumber === pos.packNumber && p.pickNumber === pos.pickNumber);
+  if (!earlier || !current) return null;
+  const remaining = new Map();
+  for (const c of current.cards ?? []) remaining.set(c.grpId, (remaining.get(c.grpId) ?? 0) + 1);
+  const mine = pickHistory.find(p => p.packNumber === pos.packNumber && p.pickNumber === earlierPick);
+  let mineLeft = mine ? 1 : 0;
+  const taken = [];
+  for (const c of earlier.cards ?? []) {
+    if (mineLeft && c.grpId === mine.grpId) { mineLeft = 0; continue; }
+    const left = remaining.get(c.grpId) ?? 0;
+    if (left > 0) { remaining.set(c.grpId, left - 1); continue; }
+    taken.push({ grpId: c.grpId, name: c.name ?? `#${c.grpId}`, color: cardColorsOf(c), grade: c.stats?.grade ?? null });
+  }
+  const colorCounts = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+  for (const t of taken) for (const ch of t.color) colorCounts[ch]++;
+  return { fromPick: earlierPick + 1, taken, colorCounts };
+}
+
+// ─── Playables meter ──────────────────────────────────────────────────────────
+
+const PLAYABLES_TARGET = 23;        // spells in a 40-card deck
+const PLAYABLE_MIN_Z = -1.0;        // about D+: a card you'd actually put in the deck
+
+/** How many of your picks would make a deck in your current colors. */
+function computePlayables(pickHistory, commit, setMetrics) {
+  const colors = commit.top;
+  let playables = 0, creatures = 0, twoDrops = 0;
+  for (const c of pickHistory) {
+    const cc = cardColorsOf(c);
+    if (isLandCard(c)) continue;
+    if (colors.length && ![...cc].every(ch => colors.includes(ch))) continue;
+    const z = cardZ(c, setMetrics);
+    if (z != null && z < PLAYABLE_MIN_Z) continue;
+    playables++;
+    if (/\bCreature\b/i.test(c.typeLine ?? '')) {
+      creatures++;
+      if (c.cmc != null && c.cmc <= 2) twoDrops++;
+    }
+  }
+  return { colors: colors.join(''), playables, target: PLAYABLES_TARGET, creatures, twoDrops };
+}
+
 // ─── Main Analyze Function ────────────────────────────────────────────────────
 
 function detectColors(pickedCards) {
@@ -854,7 +1031,7 @@ function analyze(trackerState, packCards, position, settings) {
   const { strengths, weaknesses } = computeStrengthsWeaknesses(composition, deckNeeds);
   const manaAnalysis = computeManaAnalysis(pickHistory);
   const deckGrade    = computeDeckGrade(pickHistory, setMetrics);
-  const commit = colorCommitment(pickHistory, picksMade, setMetrics);
+  const commit = colorCommitment(pickHistory, picksMade, setMetrics, setMetrics?.table?.model ? TUNE : PACE_BASE);
   const signalInsights = computeSignalInsights(trackerState, pos.packNumber, pos.pickNumber, commit.top, colorSignals);
 
   // ── Tier 3 detectors ────────────────────────────────────────────────────────
@@ -866,6 +1043,9 @@ function analyze(trackerState, packCards, position, settings) {
     pickedCards: pickHistory, colorSignals, deckNeeds: deckNeeds.slice(0, 3),
     pos, draftStyle, setMetrics, commit,
   };
+  const wheelReport = computeWheelReport(packHistory, pickHistory, pos);
+  const playables = computePlayables(pickHistory, commit, setMetrics);
+
   const recommendation = (packCards && packCards.length > 0)
     ? computeRecommendation(packCards, ctx,
         { synergies: synergyResult.synergies, archetype: archetypeResult, winConditions: winConditionResult })
@@ -890,6 +1070,9 @@ function analyze(trackerState, packCards, position, settings) {
     signalInsights,
     currentPackNumber: pos.packNumber,
     commitment: { colors: commit.top, secondColorOpen: commit.secondOpen, strength: commit.commitment },
+    wheelReport,
+    playables,
+    hasPickModel: !!setMetrics?.table?.model,
     archetypeStandings,
     // Tier 3 detector outputs
     synergies: synergyResult.synergies,
@@ -937,5 +1120,6 @@ module.exports = {
   computeSignalInsights, computeDeckGrade,
   analyze, emptyState, detectColors, scoreCard,
   // exported for tests
-  cardQuality, wheelInfo, colorCommitment, lateness, normCdf,
+  cardQuality, wheelInfo, colorCommitment, lateness, normCdf, pipsOf,
+  setWeights, getWeights, setTuning,
 };

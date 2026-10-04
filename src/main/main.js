@@ -8,6 +8,7 @@ const appLogger = require('./appLogger');
 const controlWindowModule = require('./controlWindow');
 const assistantManager = require('./assistantManager');
 const testReplay       = require('./testReplay');
+const draftLog         = require('./draftLog');
 
 const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
 
@@ -441,6 +442,16 @@ function registerIPC() {
   ipcMain.handle('scryfall:resolve-ids', async (event, grpIds) => {
     assertTrustedSender(event);
     return landsData.resolveArenaIds(sanitizeArenaIds(grpIds));
+  });
+
+  // ── Saved drafts (post-draft review) ───────────────────────────────────────
+  ipcMain.handle('drafts:list', (event) => {
+    assertTrustedSender(event);
+    return draftLog.listDrafts();
+  });
+  ipcMain.handle('drafts:get', (event, file) => {
+    assertTrustedSender(event);
+    return draftLog.getDraft(file);
   });
 
   // ── App version ───────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import StatusBar from './components/StatusBar';
 import DraftPanel from './components/DraftPanel';
 import AssistantPanel from './components/AssistantPanel';
+import DeckPanel from './components/DeckPanel';
+import ReviewPanel from './components/ReviewPanel';
 import SettingsPanel from '../components/SettingsPanel';
 import { useDraftState } from '../hooks/useDraftState';
 import { useSettings } from '../hooks/useSettings';
@@ -10,6 +12,8 @@ import { useAssistantState } from '../hooks/useAssistantState';
 const NAV_TABS = [
   { id: 'draft',     label: 'Draft' },
   { id: 'assistant', label: 'Assistant' },
+  { id: 'deck',      label: 'Deck' },
+  { id: 'review',    label: 'Review' },
   { id: 'settings',  label: 'Settings' },
 ];
 
@@ -250,6 +254,10 @@ export default function ControlApp() {
             draftState={draftState}
           />
         )}
+        {activeTab === 'deck' && (
+          <DeckPanel assistantState={assistantState} draftState={draftState} />
+        )}
+        {activeTab === 'review' && <ReviewPanel />}
         {activeTab === 'settings' && (
           <div style={{ flex: 1, overflowY: 'auto', background: '#0d0d1a' }}>
             <SettingsPanel
