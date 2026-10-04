@@ -24,18 +24,38 @@ const REMOTE = 'https://github.com/rocketvish/arena-overlay/releases/download/se
 const FORMAT = 'PremierDraft';
 const NEWEST = 8;
 
-function get(url, method = 'GET', redirects = 4) {
+function getOnce(url, method, redirects) {
   return new Promise((resolve, reject) => {
-    https.request(url, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
+    const req = https.request(url, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
         res.resume();
-        return resolve(get(res.headers.location, method, redirects - 1));
+        return resolve(getOnce(res.headers.location, method, redirects - 1));
       }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8') }));
-    }).on('error', reject).end();
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('timeout')));
+    req.end();
   });
+}
+
+/** GET/HEAD with retries — CI runners see the occasional dropped connection. */
+async function get(url, method = 'GET') {
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const r = await getOnce(url, method, 4);
+      if (r.status < 500) return r;
+      lastErr = new Error(`HTTP ${r.status} for ${url}`);
+    } catch (e) {
+      lastErr = e;
+    }
+    await new Promise((res) => setTimeout(res, 2000 * 2 ** attempt));
+  }
+  throw lastErr;
 }
 
 async function datasetDates(set) {
@@ -76,21 +96,31 @@ async function main() {
 
   const built = [];
   for (const set of sets) {
+    try {
+      await updateOne(set);
+    } catch (e) {
+      // One set's failure shouldn't stop the others from being published.
+      console.error(`${set}: ${e.message}`);
+      process.exitCode = 1;
+    }
+  }
+
+  async function updateOne(set) {
     const dates = await datasetDates(set);
     if (!dates.draft_data || !dates.game_data) {
       console.log(`${set}: public datasets not published yet — skipping`);
-      continue;
+      return;
     }
     const pub = await publishedSource(set);
     const unchanged = pub && pub.draftDataModified === dates.draft_data && pub.gameDataModified === dates.game_data;
     if (unchanged && !force) {
       console.log(`${set}: up to date (data from ${dates.game_data})`);
-      continue;
+      return;
     }
     console.log(`${set}: ${pub ? 'datasets changed' : 'no published table yet'} — ${dry ? 'would build' : 'building'}`);
-    if (dry) continue;
+    if (dry) return;
     const r = spawnSync(process.execPath, ['--max-old-space-size=8192', path.join(__dirname, 'build-set.js'), set, '--out', outDir, '--cache', cacheDir], { stdio: 'inherit' });
-    if (r.status !== 0) { console.error(`${set}: build failed`); process.exitCode = 1; continue; }
+    if (r.status !== 0) throw new Error('build failed');
     built.push(path.join(outDir, `${set}.json`));
     // Raw datasets are large; don't keep them around on CI.
     if (process.env.CI) for (const f of fs.readdirSync(cacheDir)) if (f.includes(`.${set}.`)) fs.rmSync(path.join(cacheDir, f), { force: true });
