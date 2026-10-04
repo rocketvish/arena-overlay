@@ -68,10 +68,16 @@ function getParseFailureLog() {
   return parseFailureLog;
 }
 
+const MAX_PARSE_FAILURE_LOG = 2 * 1024 * 1024;
+
 function logParseFailure(line) {
   try {
     const fp = getParseFailureLog();
     if (fp) {
+      // Keep it bounded: roll over to a single .old file at 2 MB.
+      try {
+        if (fs.statSync(fp).size > MAX_PARSE_FAILURE_LOG) fs.renameSync(fp, fp + '.old');
+      } catch {}
       fs.appendFileSync(fp, `[${new Date().toISOString()}] ${line.substring(0, 500)}\n`, 'utf-8');
     }
   } catch {}
@@ -457,10 +463,20 @@ const EVENT_FORMAT_MAP = {
   BotDraft:      'QuickDraft',
 };
 
+/**
+ * Set codes end up in cache/log file names, so only plain codes (e.g. FRA,
+ * Y26SOS) are accepted — anything else from the log is ignored.
+ */
+function validSetCode(code) {
+  if (typeof code !== 'string') return null;
+  const c = code.trim().toUpperCase();
+  return /^[A-Z0-9]{2,8}$/.test(c) ? c : null;
+}
+
 function extractEventInfo(eventName) {
-  if (!eventName) return { setCode: null, format: null };
+  if (typeof eventName !== 'string' || !eventName) return { setCode: null, format: null };
   const parts = eventName.split('_');
-  const setCode = parts.length >= 2 ? parts[1] : null;
+  const setCode = parts.length >= 2 ? validSetCode(parts[1]) : null;
   const format = EVENT_FORMAT_MAP[parts[0]] ?? null;
   return { setCode, format };
 }
@@ -479,7 +495,7 @@ function handleDraftPayload(payload) {
   const eventName   = payload.EventName   ?? payload.eventName;
   const draftStatus = payload.DraftStatus ?? payload.draftStatus;
   const { setCode: scFromEvent, format: fmtFromEvent } = extractEventInfo(eventName);
-  const setCode = scFromEvent ?? payload.WOTCReleaseId ?? payload.setCode;
+  const setCode = scFromEvent ?? validSetCode(payload.WOTCReleaseId) ?? validSetCode(payload.setCode);
 
   // Bot drafts finish with a pick response whose DraftStatus is "Completed"
   // and whose DraftPack is empty. Without this the overlay stayed stuck on

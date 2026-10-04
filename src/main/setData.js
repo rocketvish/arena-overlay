@@ -31,6 +31,8 @@ const tables = new Map();   // setCode → prepared table
 const inflight = new Map();
 const missing = new Map();  // setCode → time we learned it isn't published
 
+const SET_CODE_RE = /^[A-Z0-9]{2,8}$/;
+
 function cacheFile(setCode) {
   return path.join(app.getPath('userData'), '17lands-cache', `derived-${setCode}.json`);
 }
@@ -50,27 +52,55 @@ function readTableFile(fp) {
   }
 }
 
+const MAX_TABLE_BYTES = 8 * 1024 * 1024; // real tables are ~100–200 KB
+// GitHub release downloads redirect to its asset CDN; nothing else is followed.
+const ALLOWED_HOSTS = /^(github\.com|[a-z0-9-]+\.githubusercontent\.com)$/;
+
 function download(url, redirects = 3) {
   return new Promise((resolve, reject) => {
+    let host;
+    try { host = new URL(url).hostname; } catch { return reject(new Error('bad url')); }
+    if (!url.startsWith('https://') || !ALLOWED_HOSTS.test(host)) return reject(new Error(`refusing to fetch from ${host}`));
     https.get(url, { headers: { 'User-Agent': 'ArenaOverlay' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
         res.resume();
-        return resolve(download(res.headers.location, redirects - 1));
+        return resolve(download(new URL(res.headers.location, url).href, redirects - 1));
       }
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > MAX_TABLE_BYTES) { res.destroy(new Error('set table too large')); return; }
+        chunks.push(c);
+      });
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf-8') }));
       res.on('error', reject);
     }).on('error', reject).setTimeout(20000, function () { this.destroy(new Error('timeout')); });
   });
 }
 
+/**
+ * Basic shape checks so a corrupt or hostile table can't make the main
+ * process allocate absurd arrays or index out of bounds. A bad model is
+ * dropped; the rest of the table is still usable.
+ */
+function validModel(m) {
+  if (!m || !Array.isArray(m.ids) || !Number.isInteger(m.dim) || m.dim < 1 || m.dim > 64) return false;
+  const n = m.ids.length;
+  return n > 0 && n < 5000 &&
+    Array.isArray(m.b) && m.b.length === n &&
+    Array.isArray(m.u) && m.u.length === n * m.dim &&
+    Array.isArray(m.v) && m.v.length === n * m.dim &&
+    [m.b, m.u, m.v].every((arr) => arr.every((x) => typeof x === 'number' && Number.isFinite(x)));
+}
+
 /** Index the raw table for fast lookups. */
 function prepare(raw, fetchedAt) {
-  const m = raw.model;
+  const m = validModel(raw.model) ? raw.model : null;
   const modelIndex = new Map();
-  if (m?.ids) m.ids.forEach((id, i) => modelIndex.set(id, i));
-  return { ...raw, fetchedAt, modelIndex };
+  if (m) m.ids.forEach((id, i) => modelIndex.set(id, i));
+  const cards = raw.cards && typeof raw.cards === 'object' && !Array.isArray(raw.cards) ? raw.cards : {};
+  return { ...raw, cards, model: m, fetchedAt, modelIndex };
 }
 
 /**
@@ -78,7 +108,7 @@ function prepare(raw, fetchedAt) {
  * Resolves to the prepared table or null when none exists yet.
  */
 async function loadSetTable(setCode, { force = false } = {}) {
-  if (!setCode) return null;
+  if (typeof setCode !== 'string' || !SET_CODE_RE.test(setCode)) return null;
   const mem = tables.get(setCode);
   if (!force && mem && Date.now() - mem.fetchedAt < REFRESH_MS) return mem;
   if (inflight.has(setCode)) return inflight.get(setCode);

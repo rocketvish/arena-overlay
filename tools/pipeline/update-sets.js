@@ -89,6 +89,8 @@ async function main() {
   const force = argv.includes('--force');
   const dry = argv.includes('--dry-run');
   let sets = argv.filter((a) => !a.startsWith('--')).map((s) => s.toUpperCase());
+  const bad = sets.filter((s) => !/^[A-Z0-9]{2,8}$/.test(s));
+  if (bad.length) throw new Error(`invalid set code(s): ${bad.join(', ')}`);
   if (!sets.length) sets = await newestSets(NEWEST);
   const outDir = path.join(os.tmpdir(), 'arena-overlay-set-tables');
   const cacheDir = process.env.DATASET_CACHE ?? path.join(os.tmpdir(), 'arena-overlay-datasets');

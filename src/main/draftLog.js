@@ -21,7 +21,8 @@ function saveDraft(record) {
   try {
     fs.mkdirSync(dir(), { recursive: true });
     const endedAt = new Date().toISOString();
-    const file = `${endedAt.replace(/[:.]/g, '-')}_${record.setCode ?? 'UNK'}.json`;
+    const set = /^[A-Z0-9]{2,8}$/.test(record.setCode ?? '') ? record.setCode : 'UNK';
+    const file = `${endedAt.replace(/[:.]/g, '-')}_${set}.json`;
     fs.writeFileSync(path.join(dir(), file), JSON.stringify({ ...record, endedAt }), 'utf-8');
     // Prune oldest beyond the cap.
     const files = fs.readdirSync(dir()).filter((f) => f.endsWith('.json')).sort();

@@ -127,7 +127,9 @@ function reset() {
 }
 
 function resolveArenaLogPath(rawPath) {
-  return rawPath
+  // Local paths only — never a network share (\\host\…) or device path.
+  const raw = /^[\\/]{2}/.test((rawPath ?? '').trim()) ? DEFAULT_SETTINGS.general.arenaLogPath : rawPath;
+  return raw
     .replace('%APPDATA%', process.env.APPDATA || '')
     .replace('%LOCALAPPDATA%', process.env.LOCALAPPDATA || '')
     .replace(/\//g, path.sep);

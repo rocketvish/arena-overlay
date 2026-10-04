@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, shell, Menu } = require('electron');
 const path = require('path');
 const settings = require('./settings');
 const tray = require('./tray');
@@ -10,7 +10,7 @@ const assistantManager = require('./assistantManager');
 const testReplay       = require('./testReplay');
 const draftLog         = require('./draftLog');
 
-const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
+const { isDev, DEV_ORIGIN, isTrustedAppUrl, isAllowedExternalUrl, hardenWindow, hardenSessions, WEB_PREFERENCES } = require('./appSecurity');
 
 // Dev/test hook: run against a separate profile (settings, cache, logs) so a
 // test session never touches the real one. Must happen before anything reads userData.
@@ -55,7 +55,9 @@ const SETTING_VALIDATORS = {
   'display.sortBy': (v) => ['grade', 'gihwr', 'ohwr', 'gpwr', 'alsa', 'iwd', 'color', 'name'].includes(v),
   'display.colorFilter': (v) => v === 'all' || COLOR_PAIRS.has(v),
   'general.draftFormat': (v) => DRAFT_FORMATS.has(v),
-  'general.arenaLogPath': (v) => typeof v === 'string' && v.length > 0 && v.length <= 1000 && !v.includes('\0'),
+  // Local paths only: a UNC/device path (\\host\share, \\?\…) would make the
+  // app reach out over SMB and could leak the user's Windows credentials.
+  'general.arenaLogPath': (v) => typeof v === 'string' && v.length > 0 && v.length <= 1000 && !v.includes('\0') && !/^[\\/]{2}/.test(v.trim()),
   'general.hotkey_toggle': (v) => typeof v === 'string' && v.length <= 100,
   'general.hotkey_interact': (v) => typeof v === 'string' && v.length <= 100,
   'general.autoLaunch': (v) => typeof v === 'boolean',
@@ -70,26 +72,11 @@ function assertTrustedSender(event) {
   }
 }
 
-function isTrustedAppUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    if (isDev) {
-      return parsed.origin === 'http://localhost:5173';
-    }
-    return parsed.protocol === 'file:';
-  } catch {
-    return false;
-  }
-}
-
-function isAllowedExternalUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    const allowedHosts = new Set(['www.17lands.com', '17lands.com', 'scryfall.com', 'www.scryfall.com']);
-    return parsed.protocol === 'https:' && allowedHosts.has(parsed.hostname);
-  } catch {
-    return false;
-  }
+/** For fire-and-forget ipcMain.on handlers: ignore (don't throw) untrusted senders. */
+function fromTrustedSender(event) {
+  if (isTrustedAppUrl(event?.senderFrame?.url ?? '')) return true;
+  console.warn('[main] Ignored IPC from untrusted renderer');
+  return false;
 }
 
 function sanitizeSetCode(setCode) {
@@ -133,19 +120,6 @@ function sanitizeSetting(keyPath, value) {
   return { keyPath, value };
 }
 
-function hardenWindowNavigation(win) {
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isTrustedAppUrl(url)) {
-      event.preventDefault();
-      if (isAllowedExternalUrl(url)) shell.openExternal(url);
-    }
-  });
-}
 
 // ─── Broadcast helper ────────────────────────────────────────────────────────
 
@@ -217,18 +191,17 @@ function createOverlayWindow() {
     skipTaskbar: true,
     show: false,
     webPreferences: {
+      ...WEB_PREFERENCES,
       preload: path.join(__dirname, '..', 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
     },
   });
 
-  hardenWindowNavigation(overlayWindow);
+  hardenWindow(overlayWindow);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   setOverlayLocked(true);
 
   if (isDev) {
-    overlayWindow.loadURL('http://localhost:5173');
+    overlayWindow.loadURL(DEV_ORIGIN);
   } else {
     overlayWindow.loadFile(
       path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html')
@@ -334,7 +307,7 @@ function registerIPC() {
 
   // ── Overlay controls ──────────────────────────────────────────────────────
   ipcMain.on('overlay:toggle-interact', (event) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     toggleOverlayLock();
   });
   ipcMain.handle('overlay:set-locked', (event, locked) => {
@@ -346,7 +319,7 @@ function registerIPC() {
   // Resize grip in the overlay (only while unlocked).
   let saveBoundsTimer = null;
   ipcMain.on('overlay:resize', (event, width, height) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     if (!overlayWindow || overlayWindow.isDestroyed() || !isInteractable) return;
     const w = Math.round(Number(width));
     const h = Math.round(Number(height));
@@ -365,7 +338,7 @@ function registerIPC() {
     return hotkeyStatus;
   });
   ipcMain.on('overlay:toggle-visibility', (event) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     if (!overlayWindow) return;
     const nowVisible = !overlayWindow.isVisible();
     nowVisible ? showOverlay() : hideOverlay();
@@ -386,7 +359,7 @@ function registerIPC() {
 
   // ── Log watcher ───────────────────────────────────────────────────────────
   ipcMain.on('log-watcher:restart', (event) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     logWatcher.startWatching(broadcastToAll);
   });
 
@@ -463,7 +436,7 @@ function registerIPC() {
 
   // ── Open external URL ─────────────────────────────────────────────────────
   ipcMain.on('shell:open-url', (event, url) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     if (isAllowedExternalUrl(url)) {
       shell.openExternal(url);
     } else {
@@ -603,7 +576,7 @@ function registerUpdateIPC() {
   });
 
   ipcMain.on('updater:quit-and-install', (event) => {
-    assertTrustedSender(event);
+    if (!fromTrustedSender(event)) return;
     if (autoUpdaterInstance && updateDownloaded) {
       autoUpdaterInstance.quitAndInstall();
     }
@@ -619,6 +592,9 @@ app.on('second-instance', () => {
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
+  hardenSessions();
+  // Release builds: no default menu (it carries "Toggle Developer Tools").
+  if (!isDev) Menu.setApplicationMenu(null);
   appLogger.init();
   appLogger.log('main', 'info', 'App starting', { isDev, version: app.getVersion() });
 

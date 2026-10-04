@@ -1,47 +1,9 @@
-const { BrowserWindow, app, shell } = require('electron');
+const { BrowserWindow, app } = require('electron');
 const path = require('path');
 
-const isDev = process.env.ELECTRON_ENV === 'development' || !app.isPackaged;
+const { isDev, DEV_ORIGIN, hardenWindow, WEB_PREFERENCES } = require('./appSecurity');
 
 let controlWindow = null;
-
-function isTrustedAppUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    if (isDev) return parsed.origin === 'http://localhost:5173';
-    return parsed.protocol === 'file:';
-  } catch {
-    return false;
-  }
-}
-
-function isAllowedExternalUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    return parsed.protocol === 'https:' && [
-      'www.17lands.com',
-      '17lands.com',
-      'scryfall.com',
-      'www.scryfall.com',
-    ].includes(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function hardenWindowNavigation(win) {
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isTrustedAppUrl(url)) {
-      event.preventDefault();
-      if (isAllowedExternalUrl(url)) shell.openExternal(url);
-    }
-  });
-}
 
 function createControlWindow() {
   controlWindow = new BrowserWindow({
@@ -54,16 +16,15 @@ function createControlWindow() {
     title: 'Arena Overlay — Control',
     backgroundColor: '#0d0d1a',
     webPreferences: {
+      ...WEB_PREFERENCES,
       preload: path.join(__dirname, '..', 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
     },
   });
 
-  hardenWindowNavigation(controlWindow);
+  hardenWindow(controlWindow);
 
   if (isDev) {
-    controlWindow.loadURL('http://localhost:5173/control/');
+    controlWindow.loadURL(`${DEV_ORIGIN}/control/`);
   } else {
     controlWindow.loadFile(
       path.join(__dirname, '..', '..', 'dist', 'renderer', 'control', 'index.html')

@@ -61,7 +61,10 @@ function ensureCacheDir() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+// Cache keys come from set codes; refuse anything that isn't a plain name so
+// a bad code can never become a path outside the cache directory.
 function cacheFilePath(key) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) throw new Error(`Invalid cache key: ${String(key).slice(0, 40)}`);
   return path.join(getCacheDir(), `${key}.json`);
 }
 
@@ -109,6 +112,8 @@ function readLegacySetCache(setCode) {
 
 // ─── Network ─────────────────────────────────────────────────────────────────
 
+const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+
 function requestJSON(url, { method = 'GET', body = null, timeoutMs = 20000 } = {}) {
   return new Promise((resolve, reject) => {
     const headers = { 'User-Agent': USER_AGENT, Accept: 'application/json' };
@@ -118,7 +123,13 @@ function requestJSON(url, { method = 'GET', body = null, timeoutMs = 20000 } = {
     }
     const req = https.request(url, { method, headers }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        // Card lists are ~200 KB; refuse anything absurd rather than buffer it.
+        if (size > MAX_RESPONSE_BYTES) { res.destroy(new Error('response too large')); return; }
+        chunks.push(c);
+      });
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf-8');
         if (res.statusCode !== 200) {
@@ -345,7 +356,8 @@ async function fetchScryfallSetText(setCode) {
   while (url) {
     const page = await requestJSON(url);
     for (const card of page.data ?? []) out[normName(card.name)] = scryfallText(card);
-    url = page.has_more ? page.next_page : null;
+    // Only follow pagination that stays on Scryfall's API.
+    url = page.has_more && /^https:\/\/api\.scryfall\.com\//.test(page.next_page ?? '') ? page.next_page : null;
     if (url) await sleep(120); // Scryfall asks for ≤ 10 requests/second
   }
   return out;

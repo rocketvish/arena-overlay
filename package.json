@@ -14,14 +14,14 @@
     "test": "node scripts/test-parser.js && node scripts/test-analyzer.js && node scripts/test-deckbuilder.js && node scripts/test-game.js"
   },
   "dependencies": {
-    "chokidar": "^3.6.0",
+    "chokidar": "^4.0.3",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^10.0.3",
     "cross-env": "^7.0.3",
-    "electron": "^42.4.0",
+    "electron": "^42.11.10",
     "electron-builder": "^26.15.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -61,6 +61,14 @@
       "provider": "github",
       "owner": "rocketvish",
       "repo": "arena-overlay"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
     }
   }
 }
