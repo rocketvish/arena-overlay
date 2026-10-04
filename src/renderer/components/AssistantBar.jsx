@@ -116,11 +116,11 @@ function PicksList({ picks }) {
 // ── Late-pack insight (Section 4) ─────────────────────────────────────────────
 function InsightLine({ insight }) {
   if (!insight) return null;
-  const colorMap = { flowing: '#7ec8a0', cut: '#e08080', neutral: '#a8a8a8' };
+  const colorMap = { flowing: '#7ec8a0', cut: '#e08080', pivot: '#ffce5c', neutral: '#a8a8a8' };
   const color = colorMap[insight.tone] ?? '#a8a8a8';
   return (
     <div style={{ fontSize: 10, color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: 'italic' }}>
-      ◈ {insight.short}
+      {insight.tone === 'pivot' ? '↪' : '◈'} {insight.short}
     </div>
   );
 }

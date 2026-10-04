@@ -55,6 +55,12 @@ const BO1_16_LANDS_MAX_FIVE_PLUS = 3;
 const BO3_16_LANDS_MAX_AVG_CMC = 2.6;
 const MIN_MAIN_SOURCES = 6;            // a real main color (≥ 4 cards) needs ≥ 6 sources
 const MIN_LIGHT_SOURCES = 3;           // even a 1–3 card color needs splash-level sources
+// Frank Karsten (40-card decks, ~90% to cast on curve): double-pip cards need
+// far more sources than single-pip ones — CC by turn 4 wants ~12, which a
+// two-color 17-land deck can't give both colors. Skew toward the color with
+// double pips, harder when they're cheap.
+const MIN_DOUBLE_PIP_SOURCES = 8;
+const MIN_CHEAP_DOUBLE_PIP_SOURCES = 9; // a CC card costing ≤ 3
 
 // Splash (Karsten: ≥ 3 sources for a single-pip splash; LSV/LR: splash bombs
 // and removal, never filler, and prefer cards you cast later in the game).
@@ -263,7 +269,7 @@ function chooseNonbasics(entries, pairSet, splashColor, value) {
  * Split basics in proportion to colored pips (largest remainder), then make
  * sure each color the deck relies on has a minimum number of sources.
  */
-function splitBasics(n, colors, pips, cardCounts, otherSources) {
+function splitBasics(n, colors, pips, cardCounts, otherSources, doublePip = {}) {
   const alloc = Object.fromEntries(colors.map(c => [c, 0]));
   if (n <= 0 || colors.length === 0) return alloc;
   const total = colors.reduce((s, c) => s + pips[c], 0);
@@ -273,7 +279,9 @@ function splitBasics(n, colors, pips, cardCounts, otherSources) {
   raw.sort((a, b) => (b[1] % 1) - (a[1] % 1));
   for (let i = 0; used < n; i++, used++) alloc[raw[i % raw.length][0]]++;
 
-  const minFor = (c) => cardCounts[c] >= 4 ? MIN_MAIN_SOURCES : cardCounts[c] >= 1 ? MIN_LIGHT_SOURCES : 0;
+  const minFor = (c) => Math.max(
+    cardCounts[c] >= 4 ? MIN_MAIN_SOURCES : cardCounts[c] >= 1 ? MIN_LIGHT_SOURCES : 0,
+    doublePip[c] === 'cheap' ? MIN_CHEAP_DOUBLE_PIP_SOURCES : doublePip[c] ? MIN_DOUBLE_PIP_SOURCES : 0);
   const have = (c) => alloc[c] + (otherSources[c] ?? 0);
   for (const c of colors) {
     while (have(c) < minFor(c)) {
@@ -363,16 +371,18 @@ function buildForPair(entries, pair, ctx, splash = null, mode = 'standard') {
   const mainCards = main.filter(e => !splashCards.has(e));
   const pips = { W: 0, U: 0, B: 0, R: 0, G: 0 };
   const cardCounts = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+  const doublePip = {}; // color → 'cheap' | true when the deck has CC cards of it
   for (const e of mainCards) {
     for (const c of pairSet) {
       pips[c] += e.pips[c];
       if (e.colors.includes(c) || e.pips[c] > 0) cardCounts[c]++;
+      if (e.pips[c] >= 2) doublePip[c] = (e.cmc ?? 9) <= 3 ? 'cheap' : (doublePip[c] || true);
     }
   }
   const used = [...pair].filter(c => cardCounts[c] > 0);
   const basicColors = used.length > 0 ? used : [...pair];
   const nbSources = Object.fromEntries(basicColors.map(c => [c, nb.filter(e => producesColor(e, c)).length]));
-  const basics = splitBasics(basicsTotal - splashBasics, basicColors, pips, cardCounts, nbSources);
+  const basics = splitBasics(basicsTotal - splashBasics, basicColors, pips, cardCounts, nbSources, doublePip);
   if (splashBasics > 0) basics[splashColor] = splashBasics;
   const sourcesOf = (c) => (basics[c] ?? 0) +
     nb.filter(e => producesColor(e, c) || (e.mana.search && (basics[c] ?? 0) > 0)).length +

@@ -46,6 +46,8 @@ const DEFAULT_SETTINGS = {
     showRecommendationInOverlay: true,
     confidenceThreshold: 4,
     draftStyle: 'balanced',
+    // In-game panel: mulligan data, opponent's likely instant-speed cards, draw odds.
+    gameAssistant: true,
   },
   columns: {
     grade: true,

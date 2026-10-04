@@ -149,6 +149,19 @@ function initialScan(filePath) {
     }
   }
 
+  // A game in progress (connected after the last completed match): replay it
+  // so the game assistant has the current board.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes('MatchGameRoomStateType_MatchCompleted')) break;
+    if (lines[i].includes('"GREMessageType_ConnectResp"')) {
+      const end = latestPackLine === -1 || latestPackLine < i ? lines.length : latestPackLine - 1;
+      for (let k = i; k < end; k++) {
+        if (lines[k].charCodeAt(0) === 123) logParser.parseLine(lines[k], broadcastFn);
+      }
+      break;
+    }
+  }
+
   if (latestPackLine === -1) {
     console.log('[logWatcher] No draft pack events found in log during initial scan');
     return;

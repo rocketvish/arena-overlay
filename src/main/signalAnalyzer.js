@@ -199,7 +199,10 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
     // Picks ~4–9 are when neighbours have settled; picks 2–3 say little
     // (the drafter upstream may simply have had a better card).
     const pickWeight = pack.pickNumber <= 2 ? TUNE.earlySignalWeight : pack.pickNumber <= 8 ? 1 : 0.6;
-    const weight = (pack.packNumber === lastPack ? 1 : 0.6) * pickWeight;
+    // Packs 1 and 3 pass the same direction (same neighbour feeding you);
+    // pack 2 comes from the other side, so it says less about pack 3.
+    const sameSide = pack.packNumber % 2 === lastPack % 2;
+    const weight = (pack.packNumber === lastPack ? 1 : sameSide ? 0.8 : 0.4) * pickWeight;
     for (const card of pack.cards ?? []) {
       const l = lateness(card, pack.pickNumber, setMetrics);
       if (l <= 0) continue;
@@ -336,7 +339,12 @@ function computeManaAnalysis(pickedCards) {
 // ─── Deck Needs ───────────────────────────────────────────────────────────────
 
 /** `picksMade` is the number of cards drafted so far (across all packs). */
-function computeDeckNeeds(composition, picksMade) {
+/**
+ * `playables` (optional) = computePlayables() output. Targets from Limited
+ * fundamentals (Verhey's curve guide, "count playables, not picks"): 23
+ * playables, 15–17 creatures, 4–6 two-drops, 3+ removal.
+ */
+function computeDeckNeeds(composition, picksMade, playables = null, packSize = DEFAULT_PACK_SIZE) {
   const needs = [];
   const { creatures, nonCreatures, removalCount, cardAdvantageCount,
           curve, fixingCount, colorCounts } = composition;
@@ -352,7 +360,7 @@ function computeDeckNeeds(composition, picksMade) {
   // Thin at 2-drops
   const twoDrops = curve[2] ?? 0;
   const bigCards = (curve[5] ?? 0) + (curve[6] ?? 0);
-  if (picksMade >= 8 && twoDrops < 4 && bigCards >= 4) {
+  if ((picksMade >= 8 && twoDrops < 4 && bigCards >= 4) || (picksMade >= 2 * packSize && twoDrops < 4)) {
     needs.push({ id: 'two_drops', label: 'Curve thin at 2',
       detail: `${twoDrops}/4 needed`, priority: 'medium' });
   }
@@ -385,6 +393,19 @@ function computeDeckNeeds(composition, picksMade) {
   if (picksMade >= 12 && cardAdvantageCount === 0) {
     needs.push({ id: 'card_adv', label: 'Need card advantage',
       detail: 'No draw or token sources', priority: 'low' });
+  }
+
+  // Playables: will you reach 23 in your colors? Late picks are playable
+  // well under half the time, so project conservatively.
+  if (playables && playables.colors && picksMade >= packSize + 8) {
+    const remaining = Math.max(0, 3 * packSize - picksMade);
+    const projected = playables.playables + remaining * 0.4;
+    const short = playables.target - projected;
+    if (short > 0) {
+      needs.push({ id: 'playables', label: 'Short on playables',
+        detail: `${playables.playables}/${playables.target} in ${playables.colors}`,
+        priority: short > 3 ? 'high' : 'medium' });
+    }
   }
 
   const P = { high: 0, medium: 1, low: 2 };
@@ -630,6 +651,8 @@ let TUNE = {
   modelSharpness: 1.0,       // exponent on the model's relative pick probability
   earlySignalWeight: 0.3,    // weight of picks 2–3 when reading signals
   pack1OffColorFloor: 0.25,  // color fit floor for off-color cards in pack 1 (pivot window)
+  splashZ: 1.5,              // a single off-color pip this good stays a splash candidate
+  splashFloor: 0.35,         // …with this much color fit (LR/Karsten: splash bombs & removal)
 };
 // Without the pick model, committing earlier matched top players better.
 let PACE_BASE = { commitStart: 0, commitSpan: 8, commitBase: 0.7, commitLead: 2 };
@@ -638,7 +661,7 @@ function setTuning(t, which = 'model') {
   TUNE = { ...TUNE, ...(which === 'base' ? {} : t) };
 }
 
-function colorFitScore(card, commit, colorSignals, pos = null) {
+function colorFitScore(card, commit, colorSignals, pos = null, z = null) {
   const colors = cardColorsOf(card);
   if (!colors) return isLandCard(card) ? 0.5 : 0.8; // colorless spells fit any deck
   if (commit.top.length === 0) return 0.6;
@@ -653,6 +676,12 @@ function colorFitScore(card, commit, colorSignals, pos = null) {
   };
   const fits = colors.split('').map(fitOne);
   let raw = (Math.min(...fits) + fits.reduce((a, b) => a + b, 0) / fits.length) / 2;
+  // Splash candidate: one off-color pip on a card strong enough to splash.
+  if (commit.top.length === 2 && z != null && z >= TUNE.splashZ) {
+    const pips = pipsOf(card);
+    const offPips = COLORS.filter((c) => !commit.top.includes(c)).reduce((sum, c) => sum + pips[c], 0);
+    if (offPips > 0 && offPips <= 1) raw = Math.max(raw, TUNE.splashFloor);
+  }
   // Heavy pips in anything but your main color are harder to cast (Karsten).
   const pips = pipsOf(card);
   if (COLORS.some((c) => c !== commit.top[0] && pips[c] >= 2)) raw *= 1 - TUNE.pipPenalty;
@@ -684,12 +713,12 @@ function deckQuality(card, ctx) {
   return normCdf(z + shift);
 }
 
-function needsScore(card, deckNeeds) {
+function needsScore(card, deckNeeds, ctx = null) {
   if (!deckNeeds || deckNeeds.length === 0) return 0.5;
   let bonus = 0;
   for (const need of deckNeeds.slice(0, 3)) {
     const w = need.priority === 'high' ? 0.3 : need.priority === 'medium' ? 0.16 : 0.06;
-    if (cardAddressesNeed(card, need.id)) bonus += w;
+    if (cardAddressesNeed(card, need.id, ctx)) bonus += w;
   }
   return Math.min(1, 0.5 + bonus);
 }
@@ -735,8 +764,8 @@ function scoreCard(card, ctx) {
   const w = (ctx.modelScores ? WEIGHTS_MODEL : WEIGHTS_BASE)[phase];
   const parts = {
     quality:   deckQuality(card, ctx),
-    colorFit:  colorFitScore(card, ctx.commit, ctx.colorSignals, ctx.pos),
-    needs:     needsScore(card, ctx.deckNeeds),
+    colorFit:  colorFitScore(card, ctx.commit, ctx.colorSignals, ctx.pos, cardZ(card, ctx.setMetrics)),
+    needs:     needsScore(card, ctx.deckNeeds, ctx),
     openness:  opennessScore(card, ctx.colorSignals),
     archetype: archetypeScore(card, ctx.commit, ctx.setMetrics),
     // Relative to the model's favourite in this pack, so it lives on 0..1.
@@ -780,9 +809,16 @@ const NEED_TO_FIT_LABEL = {
   creatures: 'creature',
   card_adv: 'card advantage',
   fixing: 'mana fixing',
+  playables: 'playable',
 };
 
-function cardAddressesNeed(card, needId) {
+function cardAddressesNeed(card, needId, ctx = null) {
+  if (needId === 'playables') {
+    // A card you'd actually play, castable in your colors.
+    const top = ctx?.commit?.top ?? [];
+    const z = cardZ(card, ctx?.setMetrics);
+    return top.length > 0 && !isLandCard(card) && [...cardColorsOf(card)].every((c) => top.includes(c)) && (z == null || z >= PLAYABLE_MIN_Z);
+  }
   const tl = card.typeLine ?? '';
   const ot = card.oracleText ?? '';
   if (needId === 'removal')   return REMOVAL_RE.test(ot);
@@ -851,7 +887,7 @@ function buildPickOptions(scored, ctx) {
   // Best card that addresses the deck's top need.
   const topNeed = ctx.deckNeeds?.[0] ?? null;
   if (topNeed) {
-    const needEntry = scored.find(s => cardAddressesNeed(s.card, topNeed.id));
+    const needEntry = scored.find(s => cardAddressesNeed(s.card, topNeed.id, ctx));
     const needCard = needEntry?.card;
     if (needCard && needCard.grpId !== safe.grpId && !(upsideQualifies && needCard.grpId === upside.grpId)) {
       const reason = `fills ${NEED_TO_FIT_LABEL[topNeed.id] ?? 'a gap'} (${gradeLabel(needCard)})`;
@@ -996,6 +1032,35 @@ function computePlayables(pickHistory, commit, setMetrics) {
   return { colors: colors.join(''), playables, target: PLAYABLES_TARGET, creatures, twoDrops };
 }
 
+// ─── Pivot nudge ──────────────────────────────────────────────────────────────
+
+/**
+ * Sunk cost is the classic drafting mistake (Stark, "Drafting the Hard Way"):
+ * if another two-color pair already has clearly more playables than the
+ * colors you lean toward, say so — while there's still time to move in.
+ */
+function computePivot(pickHistory, commit, setMetrics, picksMade, packSize) {
+  if (picksMade < 8 || picksMade > packSize * 2 || commit.top.length === 0) return null;
+  const count = {};
+  for (const p of PAIRS) count[p] = 0;
+  for (const c of pickHistory) {
+    if (isLandCard(c)) continue;
+    const z = cardZ(c, setMetrics);
+    if (z != null && z < PLAYABLE_MIN_Z) continue;
+    const cc = cardColorsOf(c);
+    for (const p of PAIRS) if ([...cc].every((ch) => p.includes(ch))) count[p]++;
+  }
+  const current = PAIRS.filter((p) => commit.top.every((c) => p.includes(c))).sort((a, b) => count[b] - count[a])[0];
+  const best = PAIRS.slice().sort((a, b) => count[b] - count[a])[0];
+  if (!current || best === current || count[best] - count[current] < 3) return null;
+  return {
+    tone: 'pivot', color: best,
+    short: `Consider ${best}: ${count[best]} playables vs ${count[current]} in ${current}`,
+    detail: `Your picks so far add up to more playables in ${best} than in ${current}. Early picks are sunk cost — follow the deck you can actually build.`,
+    strength: count[best] - count[current],
+  };
+}
+
 // ─── Main Analyze Function ────────────────────────────────────────────────────
 
 function detectColors(pickedCards) {
@@ -1027,12 +1092,15 @@ function analyze(trackerState, packCards, position, settings) {
   const hasColorData = Object.values(colorSignals).some(s => s.hasData);
 
   const composition = computeDeckComposition(pickHistory);
-  const deckNeeds   = computeDeckNeeds(composition, picksMade);
+  const commit = colorCommitment(pickHistory, picksMade, setMetrics, setMetrics?.table?.model ? TUNE : PACE_BASE);
+  const playables = computePlayables(pickHistory, commit, setMetrics);
+  const deckNeeds   = computeDeckNeeds(composition, picksMade, playables, pos.packSize);
   const { strengths, weaknesses } = computeStrengthsWeaknesses(composition, deckNeeds);
   const manaAnalysis = computeManaAnalysis(pickHistory);
   const deckGrade    = computeDeckGrade(pickHistory, setMetrics);
-  const commit = colorCommitment(pickHistory, picksMade, setMetrics, setMetrics?.table?.model ? TUNE : PACE_BASE);
   const signalInsights = computeSignalInsights(trackerState, pos.packNumber, pos.pickNumber, commit.top, colorSignals);
+  const pivot = computePivot(pickHistory, commit, setMetrics, picksMade, pos.packSize);
+  if (pivot) signalInsights.unshift(pivot);
 
   // ── Tier 3 detectors ────────────────────────────────────────────────────────
   const synergyResult      = synergyDetector.analyzeSynergies(pickHistory, packCards ?? []);
@@ -1044,7 +1112,6 @@ function analyze(trackerState, packCards, position, settings) {
     pos, draftStyle, setMetrics, commit,
   };
   const wheelReport = computeWheelReport(packHistory, pickHistory, pos);
-  const playables = computePlayables(pickHistory, commit, setMetrics);
 
   const recommendation = (packCards && packCards.length > 0)
     ? computeRecommendation(packCards, ctx,

@@ -84,6 +84,21 @@ test('a pool strongest in UB builds UB: 23 spells + 17 lands, basics by pips', (
   assert.strictEqual(top.stats.removal, 3);
 });
 
+test('cheap double-pip cards in the second color get Karsten-level sources', () => {
+  // Blue is the bigger color, but black has a {B}{B} two-drop: black needs ≥ 9 sources.
+  const pool = [
+    ...many(15, i => card({ color: 'U', cmc: 2 + (i % 4), z: 0.6 })),
+    ...many(6, i => card({ color: 'B', cmc: 3 + (i % 3), z: 0.5 })),
+    card({ name: 'BB Two-Drop', color: 'B', cmc: 2, pips: 2, z: 0.9 }),
+    ...many(2, i => removal({ color: 'B', cmc: 3, z: 0.8 })),
+    ...many(8, i => card({ color: 'R', cmc: 3, z: -0.8 })),
+  ];
+  const [top] = db.buildDecks(pool);
+  assert.strictEqual(top.colors, 'UB');
+  assert.ok(top.main.some(c => c.name === 'BB Two-Drop'));
+  assert.ok((top.lands.basics.B ?? 0) >= 9, JSON.stringify(top.lands.basics));
+});
+
 test('a low-curve aggro pool plays 16 lands in Bo1 (17 in Bo3)', () => {
   const pool = [
     ...many(14, i => card({ color: 'R', cmc: 1 + (i % 3), z: 0.5 })),

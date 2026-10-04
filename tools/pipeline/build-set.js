@@ -123,7 +123,20 @@ function pairKey(colors) {
 
 // ─── Game data pass ───────────────────────────────────────────────────────────
 
-async function gamePass(file, nCards, cardIndexOf) {
+/**
+ * Keep-or-mulligan statistics (London mulligan). For hands kept at 7: win
+ * rate by number of lands, on the play and on the draw. For comparison: win
+ * rate after mulliganing to 6. Note the selection effect — only hands players
+ * chose to keep appear in the keep-7 rows — which is how 17Lands-style
+ * mulligan analyses read this data too.
+ */
+function newMulliganStats() {
+  const row = () => Array.from({ length: 8 }, () => [0, 0]); // [wins, games] by lands 0..7
+  return { keep7: { play: row(), draw: row() }, mull6: { play: [0, 0], draw: [0, 0] }, mull5: { play: [0, 0], draw: [0, 0] } };
+}
+
+async function gamePass(file, nCards, cardIndexOf, isLand = () => false) {
+  const mull = newMulliganStats();
   const z = () => new Float64Array(nCards);
   const agg = { gihW: z(), gihN: z(), ohW: z(), ohN: z(), gpW: z(), gpN: z(), gnsW: z(), gnsN: z() };
   const pairs = {}; // pair → { w: Float64Array, n: Float64Array }
@@ -132,7 +145,12 @@ async function gamePass(file, nCards, cardIndexOf) {
 
   for await (const { header, row } of readCsvGz(file)) {
     if (!cols) {
-      cols = { won: header.indexOf('won'), main: header.indexOf('main_colors'), wr: header.indexOf('user_game_win_rate_bucket'), ng: header.indexOf('user_n_games_bucket'), oh: [], drawn: [], deck: [] };
+      cols = { won: header.indexOf('won'), main: header.indexOf('main_colors'), wr: header.indexOf('user_game_win_rate_bucket'), ng: header.indexOf('user_n_games_bucket'),
+        onPlay: header.indexOf('on_play'), mulls: header.indexOf('num_mulligans'), ohAll: [], oh: [], drawn: [], deck: [] };
+      // Opening-hand columns for every card, including basic lands (which
+      // have no Arena id mapping but still count as lands).
+      header.forEach((h, i) => { if (h.startsWith('opening_hand_')) cols.ohAll.push([i, h.slice(13)]); });
+      cols.ohLand = cols.ohAll.filter(([, nm]) => isLand(nm)).map(([i]) => i);
       header.forEach((h, i) => {
         for (const [prefix, list] of [['opening_hand_', cols.oh], ['drawn_', cols.drawn], ['deck_', cols.deck]]) {
           if (h.startsWith(prefix)) {
@@ -144,6 +162,17 @@ async function gamePass(file, nCards, cardIndexOf) {
     }
     games++;
     const won = row[cols.won] === 'True' ? 1 : 0;
+    const side = row[cols.onPlay] === 'True' ? 'play' : 'draw';
+    const mulls = Number(row[cols.mulls]);
+    if (mulls === 0) {
+      let lands = 0;
+      for (const i of cols.ohLand) lands += Number(row[i]) || 0;
+      const cell = mull.keep7[side][Math.min(7, lands)];
+      cell[0] += won; cell[1]++;
+    } else if (mulls === 1 || mulls === 2) {
+      const cell = (mulls === 1 ? mull.mull6 : mull.mull5)[side];
+      cell[0] += won; cell[1]++;
+    }
     const pair = pairKey(row[cols.main]);
     let pp = null;
     if (pair) {
@@ -165,7 +194,7 @@ async function gamePass(file, nCards, cardIndexOf) {
       } else { agg.gnsN[c]++; agg.gnsW[c] += won; }
     }
   }
-  return { agg, pairs, decks, games };
+  return { agg, pairs, decks, games, mull };
 }
 
 // ─── Draft data pass ──────────────────────────────────────────────────────────
@@ -404,7 +433,14 @@ async function main() {
   console.log(`  ${nCards} cards in dataset; ${unmapped.length} without an Arena id${unmapped.length ? ': ' + unmapped.slice(0, 5).join(', ') : ''}`);
 
   console.log('  game data pass…');
-  const g = await gamePass(game.file, nCards, (nm) => indexByName.get(normCardName(nm)));
+  const BASICS = new Set(['plains', 'island', 'swamp', 'mountain', 'forest', 'wastes']);
+  const isLand = (nm) => {
+    const key = normCardName(nm);
+    if (BASICS.has(key)) return true;
+    const meta = cardList.get(key);
+    return !!meta && meta.types.some((t) => /\bLand\b/.test(t)) && !meta.types.some((t) => /\bCreature\b/.test(t));
+  };
+  const g = await gamePass(game.file, nCards, (nm) => indexByName.get(normCardName(nm)), isLand);
   console.log(`    ${g.games} games`);
   console.log('  draft data pass…');
   const d = await draftPass(draft.file, nCards, (nm) => indexByName.get(normCardName(nm)));
@@ -451,6 +487,15 @@ async function main() {
       drafts: d.drafts, games: g.games, packSize: d.packSize,
     },
     // Same shape as 17landsData.fetchColorRatings().pairs, so it can stand in for it.
+    // Keep-vs-mulligan win rates: keep7[play|draw][lands] = [winRate, games].
+    mulligan: (() => {
+      const rate = ([w, n]) => [n ? r4(w / n) : null, n];
+      return {
+        keep7: { play: g.mull.keep7.play.map(rate), draw: g.mull.keep7.draw.map(rate) },
+        mull6: { play: rate(g.mull.mull6.play), draw: rate(g.mull.mull6.draw) },
+        mull5: { play: rate(g.mull.mull5.play), draw: rate(g.mull.mull5.draw) },
+      };
+    })(),
     pairs: Object.fromEntries(Object.entries(g.decks).map(([p, x]) => [p, {
       games: x.n, wins: x.w, topgames: x.topN, topwins: x.topW,
       wr: x.n ? r4(x.w / x.n) : null, topWr: x.topN ? r4(x.topW / x.topN) : null,

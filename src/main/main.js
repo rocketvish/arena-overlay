@@ -49,6 +49,7 @@ const SETTING_VALIDATORS = {
   'assistant.showRecommendationInOverlay': (v) => typeof v === 'boolean',
   'assistant.confidenceThreshold': (v) => Number.isInteger(v) && v >= 1 && v <= 10,
   'assistant.draftStyle': (v) => ['best-card', 'balanced', 'signals'].includes(v),
+  'assistant.gameAssistant': (v) => typeof v === 'boolean',
   'display.showRecommendation': (v) => typeof v === 'boolean',
   'display.compactMode': (v) => typeof v === 'boolean',
   'display.sortBy': (v) => ['grade', 'gihwr', 'ohwr', 'gpwr', 'alsa', 'iwd', 'color', 'name'].includes(v),
@@ -482,6 +483,10 @@ function registerIPC() {
     assertTrustedSender(event);
     return assistantManager.getState();
   });
+  ipcMain.handle('game:get-state', (event) => {
+    assertTrustedSender(event);
+    return assistantManager.getGameState();
+  });
 
   // ── Test replay ───────────────────────────────────────────────────────────
   ipcMain.handle('test:start-replay', async (event, opts) => {
@@ -621,6 +626,7 @@ app.whenReady().then(() => {
   // packs that never named their set can be recognised from cached card IDs.
   landsData.setStatusSink(broadcastToAll);
   require('./logParser').setSetCodeResolver(landsData.inferSetFromGrpIds);
+  require('./logParser').setGameHandler(assistantManager.handleGameMessage);
 
   createOverlayWindow();
   assistantManager.init(sendToWindows);

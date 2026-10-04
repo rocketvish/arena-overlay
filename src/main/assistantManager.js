@@ -11,6 +11,8 @@ const setData        = require('./setData');
 const deckBuilder    = require('./deckBuilder');
 const appLogger      = require('./appLogger');
 const draftLog       = require('./draftLog');
+const gameTracker    = require('./gameTracker');
+const gameAssistant  = require('./gameAssistant');
 
 let broadcastFn  = null;
 let currentState = null;
@@ -88,7 +90,7 @@ async function loadSetMetrics(setCode) {
 }
 
 /** Best 40-card builds from the current pool (shown once there's enough to build). */
-function suggestDecks(pool, metrics, { sealed = false } = {}) {
+function suggestDecks(pool, metrics, { sealed = false, bo3 = false } = {}) {
   if (pool.length < 15) return [];
   const pairStrength = metrics?.pairs
     ? Object.fromEntries(Object.entries(metrics.pairs).map(([p, v]) => [p, v.delta ?? 0]))
@@ -107,7 +109,8 @@ function suggestDecks(pool, metrics, { sealed = false } = {}) {
     if (card.stats?.gihwr != null) return (card.stats.gihwr - mean) / std;
     return -0.3;
   };
-  const opts = { cardValue, pairStrength, format: 'bo1', maxSuggestions: 3 };
+  // Traditional events are best-of-three: land counts follow Bo3 data.
+  const opts = { cardValue, pairStrength, format: bo3 ? 'bo3' : 'bo1', maxSuggestions: 3 };
   try {
     return sealed ? deckBuilder.buildSealed(pool, opts) : deckBuilder.buildDecks(pool, opts);
   } catch (e) {
@@ -120,7 +123,8 @@ function reanalyze(packCards) {
   const trackerState = draftTracker.getState();
   const state = signalAnalyzer.analyze(trackerState, packCards, currentPosition, getAssistantSettings());
   // Deck suggestions from the pool so far (full card objects, not the trimmed pick log).
-  state.deckSuggestions = suggestDecks(trackerState.pickHistory.map(p => p.card ?? p), trackerState.setMetrics)
+  state.deckSuggestions = suggestDecks(trackerState.pickHistory.map(p => p.card ?? p), trackerState.setMetrics,
+    { bo3: trackerState.format === 'TradDraft' })
     .map(slimDeck);
   broadcast(state);
 }
@@ -241,7 +245,7 @@ async function processEvent(channel, data) {
     const { setCode, eventName, cards } = data;
     const [metrics, landsMap] = await Promise.all([loadSetMetrics(setCode), loadLandsMap(setCode)]);
     const pool = (cards ?? []).map(c => enrichOne(c.grpId, landsMap));
-    const decks = suggestDecks(pool, metrics, { sealed: true }).map(slimDeck);
+    const decks = suggestDecks(pool, metrics, { sealed: true, bo3: /Trad/i.test(eventName ?? '') }).map(slimDeck);
     appLogger.log('assistant', 'info', `Sealed pool ${eventName}: ${pool.length} cards, ${decks.length} builds`);
     broadcast({ ...(currentState ?? signalAnalyzer.emptyState()), sealed: { eventName, setCode, poolSize: pool.length, decks, at: Date.now() } });
   }
@@ -259,8 +263,73 @@ function reloadSetMetrics(setCode) {
   return queue;
 }
 
+// ─── In-game assistant ─────────────────────────────────────────────────────────
+
+const GAME_UPDATE_MS = 250; // state messages arrive many times a second
+let gameTimer = null;
+let gameContext = null;     // { setCode, cardsById, table } for the deck being played
+let lastGameAnalysis = null;
+
+/** Which set's data to use: the set the deck's cards come from (Limited decks). */
+async function loadGameContext(deckCards) {
+  const setCode = landsData.inferSetFromGrpIds(deckCards) ?? draftTracker.getState().setCode;
+  if (!setCode) return { setCode: null, cardsById: new Map(), table: null };
+  if (gameContext?.setCode === setCode) return gameContext;
+  const [res, table] = await Promise.all([
+    landsData.fetchSetData(setCode).catch(() => null),
+    setData.loadSetTable(setCode).catch(() => null),
+  ]);
+  const cardsById = new Map((res?.data ?? []).filter((c) => c.mtgaId != null).map((c) => [c.mtgaId, c]));
+  gameContext = { setCode, cardsById, table };
+  return gameContext;
+}
+
+function publishGame() {
+  gameTimer = null;
+  const snap = gameTracker.snapshot();
+  if (!snap) return;
+  const ctx = gameContext ?? { cardsById: new Map(), table: null };
+  const analysis = gameAssistant.analyzeGame(snap, ctx.cardsById, ctx.table);
+  // Names for the UI (the analysis carries grpIds).
+  for (const t of analysis?.opponent?.threats ?? []) t.name = t.name ?? ctx.cardsById.get(t.grpId)?.name;
+  lastGameAnalysis = { ...analysis, setCode: ctx.setCode, at: Date.now() };
+  if (broadcastFn) broadcastFn('game-update', lastGameAnalysis);
+}
+
+/** Called by the log parser with each parsed in-game message. */
+function handleGameMessage(json) {
+  if (settings.get().assistant?.gameAssistant === false) return;
+  if (json.matchGameRoomStateChangedEvent) {
+    const st = json.matchGameRoomStateChangedEvent.gameRoomInfo?.stateType;
+    if (st === 'MatchGameRoomStateType_MatchCompleted') {
+      gameTracker.endMatch();
+      if (broadcastFn) broadcastFn('game-update', null);
+    }
+    return;
+  }
+  const changes = gameTracker.handleGreEvent(json);
+  if (!changes.length) return;
+  if (changes.includes('game-start')) {
+    const snap = gameTracker.snapshot();
+    loadGameContext(snap?.deckCards ?? []).then(publishGame).catch((e) =>
+      appLogger.log('assistant', 'warn', 'Game context load failed', e.message));
+    return;
+  }
+  // Mulligan prompts and game end show immediately; board changes are batched.
+  if (changes.includes('mulligan') || changes.includes('game-over')) {
+    clearTimeout(gameTimer);
+    publishGame();
+  } else if (!gameTimer) {
+    gameTimer = setTimeout(publishGame, GAME_UPDATE_MS);
+  }
+}
+
+function getGameState() {
+  return lastGameAnalysis;
+}
+
 function getState() {
   return currentState;
 }
 
-module.exports = { init, handleEvent, getState, reloadSetMetrics };
+module.exports = { init, handleEvent, getState, reloadSetMetrics, handleGameMessage, getGameState };

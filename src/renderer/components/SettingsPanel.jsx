@@ -154,6 +154,10 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           description="★ recommended pick line in the overlay"
           value={assistant.showRecommendationInOverlay !== false}
           onChange={(v) => onSet('assistant.showRecommendationInOverlay', v)} />
+        <Toggle label="In-game assistant"
+          description="During games: mulligan data, opponent's likely instant-speed cards, draw odds (needs Arena's Detailed Logs)"
+          value={assistant.gameAssistant !== false}
+          onChange={(v) => onSet('assistant.gameAssistant', v)} />
         <Slider label="Signal confidence threshold"
           description="Minimum late packs seen before showing openness labels"
           value={assistant.confidenceThreshold ?? 4}

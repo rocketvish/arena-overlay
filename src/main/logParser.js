@@ -34,6 +34,13 @@ function setBroadcast(fn) {
   broadcastFn = fn;
 }
 
+// In-game messages are large and frequent, so they go straight to the game
+// tracker in the main process instead of being broadcast to the windows.
+let gameHandler = null;
+function setGameHandler(fn) {
+  gameHandler = fn;
+}
+
 function setSetCodeResolver(fn) {
   setCodeResolver = fn;
 }
@@ -192,6 +199,17 @@ function parseLine(rawLine, broadcast) {
 
   // Check for parse failures — lines with draft keywords that don't match patterns
   const hasDraftKeyword = DRAFT_KEYWORDS.some(k => line.includes(k));
+
+  // ── In-game engine messages (GRE) and match room state ───────────────────
+  if (line.charCodeAt(0) === 123 /* { */ && gameHandler &&
+      (line.includes('"greToClientEvent"') || line.includes('"matchGameRoomStateChangedEvent"'))) {
+    try {
+      gameHandler(JSON.parse(line));
+    } catch (e) {
+      appLogger.log('parser', 'warn', 'Game message parse failed', e.message);
+    }
+    return;
+  }
 
   // ── Draft.Notify (human drafts: Premier / Traditional) ───────────────────
   const notifyMatch = line.match(DRAFT_NOTIFY_RE);
@@ -706,4 +724,4 @@ function getState() {
   return { ...state };
 }
 
-module.exports = { parseLine, reset, getState, setBroadcast, setSetCodeResolver, detectFormat };
+module.exports = { parseLine, reset, getState, setBroadcast, setSetCodeResolver, setGameHandler, detectFormat };

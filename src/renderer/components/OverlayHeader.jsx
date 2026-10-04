@@ -55,7 +55,7 @@ function LockIcon({ open, color, size = 14 }) {
 export default function OverlayHeader({
   setCode, format, inDraft, packNumber, pickNumber, totalPicks, packSize = 14, interactHotkey,
   isInteractable, isMinimized, onToggleMinimize, onToggleInteract,
-  landsStatus, lastLogUpdate, packCardCount, packCardCountMismatch,
+  landsStatus, lastLogUpdate, packCardCount, packCardCountMismatch, idleLabel,
 }) {
   const setName = setCode ? (SET_NAMES[setCode] ?? setCode) : null;
   const formatShort = FORMAT_SHORT[format] ?? format ?? 'Premier';
@@ -113,7 +113,7 @@ export default function OverlayHeader({
             </span>
           ) : (
             <span style={{ fontSize: 11, color: landsStatus === 'fetching' ? '#7ec8a0' : '#666' }}>
-              {landsStatus === 'fetching' ? '⟳ Loading…' : 'Waiting for draft…'}
+              {landsStatus === 'fetching' ? '⟳ Loading…' : (idleLabel ?? 'Waiting for draft…')}
             </span>
           )}
         </div>

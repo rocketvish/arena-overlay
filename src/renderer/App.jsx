@@ -5,11 +5,16 @@ import TestModeBanner from './components/TestModeBanner';
 import { useDraftState } from './hooks/useDraftState';
 import { useSettings } from './hooks/useSettings';
 import { useAssistantState } from './hooks/useAssistantState';
+import { useGameState } from './hooks/useGameState';
+import GamePanel from './components/GamePanel';
 
 export default function App() {
   const { settings, loading: settingsLoading } = useSettings();
   const { draftState } = useDraftState();
   const assistantState = useAssistantState();
+  const game = useGameState();
+  // A game in progress takes over the overlay unless a draft is running.
+  const showGame = !!game && !draftState.inDraft && settings?.assistant?.gameAssistant !== false;
 
   const [status, setStatus] = useState('watching');
   const [isInteractable, setIsInteractable] = useState(false);
@@ -101,6 +106,7 @@ export default function App() {
         onToggleMinimize={() => setIsMinimized((m) => !m)}
         onToggleInteract={() => window.electronAPI?.toggleInteract()}
         landsStatus={draftState.landsStatus}
+        idleLabel={showGame ? 'In game' : undefined}
         lastLogUpdate={lastLogUpdate}
         packCardCount={draftState.enrichedPack?.length ?? 0}
         packCardCountMismatch={
@@ -109,7 +115,8 @@ export default function App() {
         }
       />
 
-      {!isMinimized && (
+      {!isMinimized && showGame && <GamePanel game={game} />}
+      {!isMinimized && !showGame && (
         <DraftOverlay
           draftState={draftState}
           settings={settings}

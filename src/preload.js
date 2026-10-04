@@ -54,6 +54,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Assistant ─────────────────────────────────────────────────────────────
   getAssistantState: () => ipcRenderer.invoke('assistant:get-state'),
+  getGameState: () => ipcRenderer.invoke('game:get-state'),
+  onGameUpdate: (cb) => {
+    const h = (_e, d) => cb(d);
+    ipcRenderer.on('game-update', h);
+    return () => ipcRenderer.removeListener('game-update', h);
+  },
 
   onAssistantUpdate: (cb) => {
     const h = (_e, d) => cb(d);
