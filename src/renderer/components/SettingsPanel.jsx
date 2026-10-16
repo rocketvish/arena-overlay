@@ -97,7 +97,7 @@ function ActionBtn({ label, onClick, danger }) {
 // ── Main panel ────────────────────────────────────────────────────────────────
 export default function SettingsPanel({ settings, onSet, onClose }) {
   if (!settings) return null;
-  const { overlay = {}, columns = {}, display = {}, general = {}, assistant = {} } = settings;
+  const { window: win = {}, columns = {}, display = {}, general = {}, assistant = {} } = settings;
 
   async function handleClearCache() {
     await window.electronAPI?.clearCache();
@@ -118,10 +118,11 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#666', fontSize: 16, cursor: 'pointer', padding: '0 4px' }}>✕</button>
       </div>
 
-      {/* Overlay */}
-      <Section title="Overlay">
-        <Slider label="Background opacity" value={overlay.opacity ?? 0.85} min={0.1} max={1} step={0.05}
-          onChange={(v) => onSet('overlay.opacity', v)} format={(v) => `${Math.round(v * 100)}%`} />
+      {/* Window */}
+      <Section title="Window">
+        <Toggle label="Keep on top"
+          description="Keep this window above Arena when they share a screen"
+          value={win.alwaysOnTop === true} onChange={(v) => onSet('window.alwaysOnTop', v)} />
       </Section>
 
       {/* Stat columns */}
@@ -147,16 +148,8 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           description="Analyze color signals, deck needs, and recommend picks"
           value={assistant.enabled !== false}
           onChange={(v) => onSet('assistant.enabled', v)} />
-        <Toggle label="Show signals in overlay"
-          description="Color openness pills in the overlay"
-          value={assistant.showSignalsInOverlay !== false}
-          onChange={(v) => onSet('assistant.showSignalsInOverlay', v)} />
-        <Toggle label="Show pick recommendation in overlay"
-          description="★ recommended pick line in the overlay"
-          value={assistant.showRecommendationInOverlay !== false}
-          onChange={(v) => onSet('assistant.showRecommendationInOverlay', v)} />
         <Toggle label="In-game assistant"
-          description="During games: mulligan data, opponent's likely instant-speed cards, draw odds (needs Arena's Detailed Logs)"
+          description="Game tab: mulligan data, the opponent's likely archetype and tricks, draw odds (needs Arena's Detailed Logs)"
           value={assistant.gameAssistant !== false}
           onChange={(v) => onSet('assistant.gameAssistant', v)} />
         <Slider label="Signal confidence threshold"
@@ -176,7 +169,7 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
 
       {/* Display */}
       <Section title="Display">
-        <Toggle label="Show recommendation bar" description="Highlight the best pick in the overlay"
+        <Toggle label="Show recommendation bar" description="Highlight the best pick in the pack list"
           value={display.showRecommendation ?? true} onChange={(v) => onSet('display.showRecommendation', v)} />
         <Toggle label="Compact mode" value={display.compactMode ?? false} onChange={(v) => onSet('display.compactMode', v)} />
       </Section>
@@ -194,12 +187,9 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
         <TextInput label="Arena log path"
           value={general.arenaLogPath}
           onChange={(v) => onSet('general.arenaLogPath', v)} />
-        <TextInput label="Toggle visibility hotkey"
+        <TextInput label="Show / hide window hotkey"
           value={general.hotkey_toggle}
           onChange={(v) => onSet('general.hotkey_toggle', v)} />
-        <TextInput label="Pin / unpin hotkey"
-          value={general.hotkey_interact}
-          onChange={(v) => onSet('general.hotkey_interact', v)} />
         <Toggle label="Launch on system startup"
           value={general.autoLaunch ?? false}
           onChange={(v) => onSet('general.autoLaunch', v)} />

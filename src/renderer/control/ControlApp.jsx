@@ -5,12 +5,15 @@ import AssistantPanel from './components/AssistantPanel';
 import DeckPanel from './components/DeckPanel';
 import ReviewPanel from './components/ReviewPanel';
 import SettingsPanel from '../components/SettingsPanel';
+import GamePanel from '../components/GamePanel';
 import { useDraftState } from '../hooks/useDraftState';
 import { useSettings } from '../hooks/useSettings';
 import { useAssistantState } from '../hooks/useAssistantState';
+import { useGameState } from '../hooks/useGameState';
 
 const NAV_TABS = [
   { id: 'draft',     label: 'Draft' },
+  { id: 'game',      label: 'Game' },
   { id: 'assistant', label: 'Assistant' },
   { id: 'deck',      label: 'Deck' },
   { id: 'review',    label: 'Review' },
@@ -21,13 +24,20 @@ export default function ControlApp() {
   const { settings, setSetting, loading: settingsLoading } = useSettings();
   const { draftState, refreshLandsData } = useDraftState();
   const assistantState = useAssistantState();
+  const game = useGameState();
 
   const [activeTab, setActiveTab] = useState('draft');
+  // Follow the action between the Draft and Game tabs (never away from the
+  // other tabs): a game starting shows the Game tab, a draft starting the Draft tab.
+  const inGame = !!game && !game.result;
+  useEffect(() => {
+    if (inGame && !draftState.inDraft) setActiveTab((t) => (t === 'draft' ? 'game' : t));
+  }, [inGame, draftState.inDraft]);
+  useEffect(() => {
+    if (draftState.inDraft) setActiveTab((t) => (t === 'game' ? 'draft' : t));
+  }, [draftState.inDraft]);
   const [status, setStatus] = useState('watching');
   const [watcherRunning, setWatcherRunning] = useState(true);
-  const [overlayVisible, setOverlayVisible] = useState(true);
-  const [overlayInteractable, setOverlayInteractable] = useState(false);
-  const [hotkeys, setHotkeys] = useState(null);
   const [updateInfo, setUpdateInfo] = useState(null);  // { version, downloaded }
   const [version, setVersion] = useState('0.5.0');
   const [replayActive, setReplayActive] = useState(false);
@@ -39,9 +49,6 @@ export default function ControlApp() {
 
     window.electronAPI.getAppVersion?.().then((v) => { if (v) setVersion(v); });
     window.electronAPI.getWatcherStatus?.().then((s) => { if (s) setWatcherRunning(s.running); });
-    window.electronAPI.getOverlayVisible?.().then((v) => setOverlayVisible(v));
-    window.electronAPI.getOverlayLocked?.().then((locked) => setOverlayInteractable(!locked));
-    window.electronAPI.getHotkeyStatus?.().then(setHotkeys);
 
     const unsubs = [
       window.electronAPI.onStatusUpdate((s) => {
@@ -52,9 +59,6 @@ export default function ControlApp() {
       }),
       window.electronAPI.onUpdateAvailable?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: false }))),
       window.electronAPI.onUpdateDownloaded?.((d) => setUpdateInfo((prev) => ({ ...prev, version: d?.version, downloaded: true }))),
-      window.electronAPI.onOverlayVisibilityChanged?.((v) => setOverlayVisible(v)),
-      window.electronAPI.onInteractableChanged?.(setOverlayInteractable),
-      window.electronAPI.onHotkeysStatus?.(setHotkeys),
     ].filter(Boolean);
 
     return () => unsubs.forEach((fn) => fn());
@@ -77,12 +81,6 @@ export default function ControlApp() {
     });
     return () => { unsubStart?.(); unsubEnd?.(); };
   }, []);
-
-  const handleToggleOverlay = useCallback(async () => {
-    const newVisible = !overlayVisible;
-    await window.electronAPI?.setOverlayVisible?.(newVisible);
-    setOverlayVisible(newVisible);
-  }, [overlayVisible]);
 
   const handleToggleWatcher = useCallback(async () => {
     if (!window.electronAPI) return;
@@ -114,6 +112,8 @@ export default function ControlApp() {
     }
   }, [replayActive]);
 
+  const onTop = settings?.window?.alwaysOnTop === true;
+
   if (settingsLoading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#444' }}>
@@ -124,7 +124,7 @@ export default function ControlApp() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d0d1a', color: '#e0e0e0' }}>
-      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} isInteractable={overlayInteractable} interactHotkey={hotkeys?.interact} />
+      <StatusBar status={status} draftState={draftState} watcherRunning={watcherRunning} />
 
       {updateInfo && (
         <div style={{ padding: '6px 16px', background: 'rgba(80,160,80,0.18)', borderBottom: '1px solid rgba(80,160,80,0.3)', fontSize: 12, color: '#7ec8a0', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -153,13 +153,14 @@ export default function ControlApp() {
       )}
 
       {/* Navigation tabs */}
-      <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+      {/* Wraps instead of scrolling when the window is narrow (it usually sits beside Arena). */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0, borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
         {NAV_TABS.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             style={{
-              padding: '8px 20px', fontSize: 12,
+              padding: '8px 12px', fontSize: 12, whiteSpace: 'nowrap',
               background: activeTab === tab.id ? 'rgba(255,255,255,0.07)' : 'transparent',
               border: 'none',
               borderBottom: activeTab === tab.id ? '2px solid #5080dc' : '2px solid transparent',
@@ -173,26 +174,26 @@ export default function ControlApp() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Show / Hide overlay — primary action */}
+        {/* Keep this window above Arena (when they share a screen). */}
         <button
-          onClick={handleToggleOverlay}
+          onClick={() => setSetting('window.alwaysOnTop', !onTop)}
           style={{
-            margin: '4px 4px 4px 0', padding: '4px 14px', fontSize: 11, fontWeight: 600,
-            background: overlayVisible ? 'rgba(200,60,60,0.25)' : 'rgba(60,200,100,0.25)',
-            border: `1px solid ${overlayVisible ? 'rgba(200,60,60,0.5)' : 'rgba(60,200,100,0.5)'}`,
+            margin: '4px 4px 4px 0', padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap', fontWeight: 600,
+            background: onTop ? 'rgba(80,140,220,0.25)' : 'rgba(100,100,100,0.2)',
+            border: `1px solid ${onTop ? 'rgba(80,140,220,0.55)' : 'rgba(100,100,100,0.35)'}`,
             borderRadius: 4,
-            color: overlayVisible ? '#e07070' : '#60d888',
+            color: onTop ? '#8fb8ff' : '#888',
             cursor: 'pointer',
           }}
-          title={overlayVisible ? 'Hide the overlay window' : 'Show the overlay window'}
+          title={onTop ? 'This window stays above Arena. Click to let Arena cover it' : 'Keep this window above Arena (useful when they share a screen)'}
         >
-          {overlayVisible ? 'Hide Overlay' : 'Show Overlay'}
+          {onTop ? '📌 On top' : 'On top'}
         </button>
 
         <button
           onClick={handleToggleWatcher}
           style={{
-            margin: '4px 4px 4px 0', padding: '4px 12px', fontSize: 11,
+            margin: '4px 4px 4px 0', padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap',
             background: watcherRunning ? 'rgba(200,80,80,0.2)' : 'rgba(80,200,120,0.2)',
             border: `1px solid ${watcherRunning ? 'rgba(200,80,80,0.4)' : 'rgba(80,200,120,0.4)'}`,
             borderRadius: 4,
@@ -207,7 +208,7 @@ export default function ControlApp() {
         <button
           onClick={handleToggleReplay}
           style={{
-            margin: '4px 8px 4px 0', padding: '4px 12px', fontSize: 11,
+            margin: '4px 8px 4px 0', padding: '4px 10px', fontSize: 11, whiteSpace: 'nowrap',
             background: replayActive ? 'rgba(200,120,30,0.35)' : 'rgba(100,100,100,0.2)',
             border: `1px solid ${replayActive ? 'rgba(200,120,30,0.6)' : 'rgba(100,100,100,0.35)'}`,
             borderRadius: 4,
@@ -247,6 +248,17 @@ export default function ControlApp() {
             onSet={setSetting}
             onRefreshData={refreshLandsData}
           />
+        )}
+        {activeTab === 'game' && (
+          game && settings?.assistant?.gameAssistant !== false
+            ? <div style={{ flex: 1, overflowY: 'auto' }}><GamePanel game={game} /></div>
+            : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#444', fontSize: 13, textAlign: 'center', padding: 32 }}>
+                {settings?.assistant?.gameAssistant === false
+                  ? 'The in-game assistant is off (Settings → Assistant).'
+                  : <>No game in progress<br /><span style={{ fontSize: 11, color: '#333' }}>Needs Arena's "Detailed Logs (Plugin Support)" option on.</span></>}
+              </div>
+            )
         )}
         {activeTab === 'assistant' && (
           <AssistantPanel

@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import CardRow from '../../components/CardRow';
 import ColorFilter from '../../components/ColorFilter';
+import { arenaVisualSort, resolveBasicLandName } from '../../utils/arenaSort';
 
 // ── Sorting ───────────────────────────────────────────────────────────────────
 const GRADE_ORDER = ['A+','A','A-','B+','B','B-','C+','C','C-','D+','D','D-','F'];
@@ -12,7 +13,8 @@ function colorSortKey(color) {
   return COLOR_ORDER[color[0]] ?? 9;
 }
 
-function sortCards(cards, sortBy) {
+function sortCards(cards, sortBy, winByCard = null) {
+  if (sortBy === 'arena') return arenaVisualSort(cards);
   return [...cards].sort((a, b) => {
     switch (sortBy) {
       case 'grade': {
@@ -24,6 +26,7 @@ function sortCards(cards, sortBy) {
       case 'ohwr':  return (b.stats?.ohwr  ?? -1) - (a.stats?.ohwr  ?? -1);
       case 'color': return colorSortKey(a.color) - colorSortKey(b.color);
       case 'name':  return (a.name ?? '').localeCompare(b.name ?? '');
+      case 'win':   return (winByCard?.[b.grpId] ?? -99) - (winByCard?.[a.grpId] ?? -99);
       default: return 0;
     }
   });
@@ -372,6 +375,8 @@ function SignalInsightsPanel({ insights }) {
 }
 
 const SORT_OPTIONS = [
+  { value: 'arena', label: 'Arena order' },
+  { value: 'win',   label: 'Win value' },
   { value: 'grade',  label: 'Grade' },
   { value: 'gihwr', label: 'GIH%' },
   { value: 'ohwr',  label: 'OH%' },
@@ -388,14 +393,19 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
   const columns  = { ...(settings?.columns ?? {}), win: settings?.columns?.win !== false && !!winByCard };
   const winBestValue = winByCard ? Math.max(...Object.values(winByCard)) : null;
   const display  = settings?.display  ?? {};
-  const sortBy      = display.sortBy      ?? 'grade';
+  // Default: the order Arena shows the pack in, so the list lines up with the screen.
+  const sortBy      = display.packSort    ?? 'arena';
   const colorFilter = display.colorFilter ?? 'all';
   const compact     = display.compactMode ?? false;
 
   const sortedFiltered = useMemo(() => {
-    const filtered = (enrichedPack ?? []).filter((c) => cardMatchesFilter(c, colorFilter));
-    return sortCards(filtered, sortBy);
-  }, [enrichedPack, sortBy, colorFilter]);
+    const named = (enrichedPack ?? []).map((c) => {
+      const name = resolveBasicLandName(c);
+      return name !== c.name ? { ...c, name } : c;
+    });
+    const filtered = named.filter((c) => cardMatchesFilter(c, colorFilter));
+    return sortCards(filtered, sortBy, winByCard);
+  }, [enrichedPack, sortBy, colorFilter, winByCard]);
 
   const recommendedGrpId = recommendation?.primary?.grpId ?? null;
 
@@ -405,7 +415,7 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
   }
 
   function handleSortChange(val) {
-    onSet('display.sortBy', val);
+    onSet('display.packSort', val);
   }
 
   if (!inDraft) {
@@ -496,7 +506,7 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
               card={card}
               columns={columns}
               compact={compact}
-              isTopPick={i === 0}
+              isTopPick={i === 0 && ['win', 'grade', 'gihwr', 'ohwr'].includes(sortBy)}
               isRecommended={recommendedGrpId != null && card.grpId === recommendedGrpId}
               winPct={winByCard?.[card.grpId] ?? null}
               winBest={winByCard?.[card.grpId] != null && winByCard[card.grpId] === winBestValue && winBestValue > 0}

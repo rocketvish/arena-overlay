@@ -12,38 +12,30 @@ function getSettingsFile() {
 const DEFAULT_SETTINGS = {
   general: {
     arenaLogPath: '%APPDATA%/../LocalLow/Wizards Of The Coast/MTGA/Player.log',
-    hotkey_toggle: 'Alt+H',
-    hotkey_interact: 'Alt+D',
+    hotkey_toggle: 'Alt+H',   // show / hide the window
     draftFormat: 'PremierDraft',
     runOnStartup: false,
     minimizeToTray: true,
     // Legacy compat
     autoLaunch: false,
   },
-  overlay: {
-    autoShowOnDraft: true,
-    autoHideOnDraftEnd: true,
-    x: -1,
-    y: 50,
-    width: 340,
-    height: 700,
-    opacity: 0.85,
-    fontSize: 'medium',
-    visible: true,
-    // Legacy compat
-    locked: false,
-    minimized: false,
+  // The app window (no in-game overlay since v0.10). Position null = default spot.
+  window: {
+    x: null,
+    y: null,
+    width: 520,
+    height: 820,
+    alwaysOnTop: false,
   },
   display: {
     sortBy: 'grade',
+    packSort: 'arena',      // pack list order: as Arena shows it
     colorFilter: 'all',
     compactMode: false,
     showRecommendation: true,
   },
   assistant: {
     enabled: true,
-    showSignalsInOverlay: true,
-    showRecommendationInOverlay: true,
     confidenceThreshold: 4,
     draftStyle: 'balanced',
     // In-game panel: mulligan data, opponent's likely instant-speed cards, draw odds.

@@ -156,7 +156,7 @@ export function useDraftState() {
         }
 
         const sc = setCode || currentSetCode.current;
-        // If we never saw draft-started (overlay opened mid-draft), load data
+        // If we never saw draft-started (app opened mid-draft), load data
         // now; and retry after an earlier failure (main rate-limits retries).
         if (sc && sc !== currentSetCode.current) {
           currentSetCode.current = sc;

@@ -9,19 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setSetting: (keyPath, value) => ipcRenderer.invoke('settings:set', keyPath, value),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
 
-  // ── Overlay controls ──────────────────────────────────────────────────────
-  toggleInteract: () => ipcRenderer.send('overlay:toggle-interact'),
-  setOverlayLocked: (locked) => ipcRenderer.invoke('overlay:set-locked', locked),
-  getOverlayLocked: () => ipcRenderer.invoke('overlay:get-locked'),
-  resizeOverlay: (width, height) => ipcRenderer.send('overlay:resize', width, height),
-  moveOverlay: (x, y) => ipcRenderer.send('overlay:move', x, y),
-  setOverlayBusy: (busy) => ipcRenderer.send('overlay:busy', busy),
-  getOverlayHover: () => ipcRenderer.invoke('overlay:get-hover'),
-  setHitRegions: (regions) => ipcRenderer.send('overlay:hit-regions', regions),
+  // ── Hotkey (show / hide the window) ───────────────────────────────────────
   getHotkeyStatus: () => ipcRenderer.invoke('hotkeys:status'),
-  toggleVisibility: () => ipcRenderer.send('overlay:toggle-visibility'),
-  getOverlayVisible: () => ipcRenderer.invoke('overlay:get-visible'),
-  setOverlayVisible: (visible) => ipcRenderer.invoke('overlay:set-visible', visible),
 
   // ── Log watcher ───────────────────────────────────────────────────────────
   restartLogWatcher: () => ipcRenderer.send('log-watcher:restart'),
@@ -96,16 +85,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('status-update', h);
     return () => ipcRenderer.removeListener('status-update', h);
   },
-  onInteractableChanged: (cb) => {
-    const h = (_e, v) => cb(v);
-    ipcRenderer.on('interactable-changed', h);
-    return () => ipcRenderer.removeListener('interactable-changed', h);
-  },
-  onOverlayHover: (cb) => {
-    const h = (_e, v) => cb(v);
-    ipcRenderer.on('overlay-hover', h);
-    return () => ipcRenderer.removeListener('overlay-hover', h);
-  },
   onDraftStarted: (cb) => {
     const h = (_e, d) => cb(d);
     ipcRenderer.on('draft-started', h);
@@ -155,11 +134,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const h = (_e, s) => cb(s);
     ipcRenderer.on('settings-changed', h);
     return () => ipcRenderer.removeListener('settings-changed', h);
-  },
-  onOverlayVisibilityChanged: (cb) => {
-    const h = (_e, v) => cb(v);
-    ipcRenderer.on('overlay-visibility-changed', h);
-    return () => ipcRenderer.removeListener('overlay-visibility-changed', h);
   },
   onUpdateAvailable: (cb) => {
     const h = (_e, d) => cb(d);

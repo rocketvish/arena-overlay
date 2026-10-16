@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, shell, Menu } = require('electron');
+const { app, ipcMain, globalShortcut, shell, Menu } = require('electron');
 const path = require('path');
 const settings = require('./settings');
 const tray = require('./tray');
@@ -10,7 +10,7 @@ const assistantManager = require('./assistantManager');
 const testReplay       = require('./testReplay');
 const draftLog         = require('./draftLog');
 
-const { isDev, DEV_ORIGIN, isTrustedAppUrl, isAllowedExternalUrl, hardenWindow, hardenSessions, WEB_PREFERENCES } = require('./appSecurity');
+const { isDev, isTrustedAppUrl, isAllowedExternalUrl, hardenSessions } = require('./appSecurity');
 
 // Dev/test hook: run against a separate profile (settings, cache, logs) so a
 // test session never touches the real one. Must happen before anything reads userData.
@@ -19,35 +19,20 @@ if (!app.isPackaged && process.env.ARENA_OVERLAY_USERDATA) {
 }
 
 // One instance only. A second copy (e.g. launched from the Start menu while the
-// tray copy is running) used to create a second overlay window — which could
-// never be unlocked because the first instance owns the Alt+D hotkey — and a
-// second log watcher, doubling every draft event.
+// tray copy is running) would start a second log watcher, doubling every
+// draft event.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 }
 
-let overlayWindow = null;
-// Mouse handling. The overlay never takes keyboard focus and is click-through
-// except over its "hot spots" (top bar, resize corner, a few buttons — the
-// renderer reports their rectangles). Everything else, the card list
-// included, lets clicks through to Arena; while the cursor is over that part
-// the overlay fades so you can see what's underneath. Pinned (legacy hotkey):
-// click-through everywhere.
-let overlayPinned = false;
-let overlayHover = 'none';  // 'none' | 'body' (over the overlay, click-through) | 'hit' (over a hot spot)
-let overlayBusy = false;    // a drag or resize is in progress: keep the mouse even if the cursor slips outside
-let hitRegions = [];        // [{ x, y, w, h }] in window coordinates (DIP)
-let hoverTimer = null;
-const HOVER_POLL_MS = 50;
-const hotkeyStatus = { toggle: null, interact: null }; // { key, ok } per hotkey
+const hotkeyStatus = { toggle: null }; // { key, ok }
 
 const DRAFT_FORMATS = new Set(['PremierDraft', 'QuickDraft', 'TradDraft', 'Sealed']);
 const COLOR_PAIRS = new Set(['W', 'U', 'B', 'R', 'G', 'WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG']);
 
 const SETTING_VALIDATORS = {
-  'overlay.opacity': (v) => typeof v === 'number' && v >= 0.1 && v <= 1,
-  'overlay.visible': (v) => typeof v === 'boolean',
+  'window.alwaysOnTop': (v) => typeof v === 'boolean',
   'columns.win': (v) => typeof v === 'boolean',
   'columns.grade': (v) => typeof v === 'boolean',
   'columns.gihwr': (v) => typeof v === 'boolean',
@@ -57,13 +42,12 @@ const SETTING_VALIDATORS = {
   'columns.iwd': (v) => typeof v === 'boolean',
   'columns.ata': (v) => typeof v === 'boolean',
   'assistant.enabled': (v) => typeof v === 'boolean',
-  'assistant.showSignalsInOverlay': (v) => typeof v === 'boolean',
-  'assistant.showRecommendationInOverlay': (v) => typeof v === 'boolean',
   'assistant.confidenceThreshold': (v) => Number.isInteger(v) && v >= 1 && v <= 10,
   'assistant.draftStyle': (v) => ['best-card', 'balanced', 'signals'].includes(v),
   'assistant.gameAssistant': (v) => typeof v === 'boolean',
   'display.showRecommendation': (v) => typeof v === 'boolean',
   'display.compactMode': (v) => typeof v === 'boolean',
+  'display.packSort': (v) => ['arena', 'win', 'grade', 'gihwr', 'ohwr', 'color', 'name'].includes(v),
   'display.sortBy': (v) => ['grade', 'gihwr', 'ohwr', 'gpwr', 'alsa', 'iwd', 'color', 'name'].includes(v),
   'display.colorFilter': (v) => v === 'all' || COLOR_PAIRS.has(v),
   'general.draftFormat': (v) => DRAFT_FORMATS.has(v),
@@ -71,7 +55,6 @@ const SETTING_VALIDATORS = {
   // app reach out over SMB and could leak the user's Windows credentials.
   'general.arenaLogPath': (v) => typeof v === 'string' && v.length > 0 && v.length <= 1000 && !v.includes('\0') && !/^[\\/]{2}/.test(v.trim()),
   'general.hotkey_toggle': (v) => typeof v === 'string' && v.length <= 100,
-  'general.hotkey_interact': (v) => typeof v === 'string' && v.length <= 100,
   'general.autoLaunch': (v) => typeof v === 'boolean',
   'general.runOnStartup': (v) => typeof v === 'boolean',
   'general.minimizeToTray': (v) => typeof v === 'boolean',
@@ -136,15 +119,8 @@ function sanitizeSetting(keyPath, value) {
 // ─── Broadcast helper ────────────────────────────────────────────────────────
 
 function sendToWindows(channel, data) {
-  const windows = [
-    overlayWindow,
-    controlWindowModule.getControlWindow(),
-  ];
-  for (const win of windows) {
-    if (win && !win.isDestroyed()) {
-      win.webContents.send(channel, data);
-    }
-  }
+  const win = controlWindowModule.getControlWindow();
+  if (win && !win.isDestroyed()) win.webContents.send(channel, data);
 }
 
 function broadcastToAll(channel, data) {
@@ -154,163 +130,6 @@ function broadcastToAll(channel, data) {
   assistantManager.handleEvent(channel, data).catch((e) => {
     console.error('[assistant] handleEvent error:', e.message);
   });
-}
-
-// ─── Window Creation ────────────────────────────────────────────────────────
-
-/** Saved position, or a default top-right spot if it's unset or off every screen. */
-function initialOverlayBounds(overlay) {
-  const width = overlay.width;
-  const height = overlay.height;
-  const defaultPos = () => {
-    const { workArea } = screen.getPrimaryDisplay();
-    return { x: workArea.x + workArea.width - width - 10, y: workArea.y + 50 };
-  };
-  if (overlay.x === -1) return { ...defaultPos(), width, height };
-  // Require the title strip to be on some display (monitor unplugged, resolution changed…).
-  const visible = screen.getAllDisplays().some(({ workArea: a }) =>
-    overlay.x + 40 > a.x && overlay.x < a.x + a.width - 40 &&
-    overlay.y >= a.y - 10 && overlay.y < a.y + a.height - 30);
-  return visible ? { x: overlay.x, y: overlay.y, width, height } : { ...defaultPos(), width, height };
-}
-
-/** Show the overlay without taking keyboard focus away from Arena. */
-function showOverlay() {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.showInactive();
-  // Windows can drop TOPMOST when a fullscreen app activates; re-assert it.
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-}
-
-function hideOverlay() {
-  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
-}
-
-function createOverlayWindow() {
-  const s = settings.get();
-  const { overlay } = s;
-
-  overlayWindow = new BrowserWindow({
-    ...initialOverlayBounds(overlay),
-    // No window opacity: the opacity setting only fades the background
-    // (renderer), so text stays crisp.
-    frame: false,
-    transparent: true,
-    // Never takes focus, so Arena keeps the keyboard. Moved and resized by
-    // the renderer's own handles (transparent windows can't be edge-resized).
-    resizable: false,
-    movable: false,
-    focusable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    show: false,
-    webPreferences: {
-      ...WEB_PREFERENCES,
-      preload: path.join(__dirname, '..', 'preload.js'),
-    },
-  });
-
-  hardenWindow(overlayWindow);
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-  overlayWindow.setIgnoreMouseEvents(true);
-  setOverlayPinned(overlay.locked === true);
-  startHoverWatch();
-
-  if (isDev) {
-    overlayWindow.loadURL(DEV_ORIGIN);
-  } else {
-    overlayWindow.loadFile(
-      path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html')
-    );
-  }
-
-  overlayWindow.once('ready-to-show', () => {
-    if (overlay.visible) {
-      showOverlay();
-      // The control window may have asked before the overlay was shown.
-      sendToWindows('overlay-visibility-changed', true);
-    }
-  });
-
-  overlayWindow.on('moved', saveWindowBounds);
-  overlayWindow.on('resized', saveWindowBounds);
-  overlayWindow.on('closed', () => { overlayWindow = null; stopHoverWatch(); });
-
-  return overlayWindow;
-}
-
-/**
- * Hover tracking by polling the cursor position (cheap). Not
- * `setIgnoreMouseEvents(true, { forward: true })`: on Windows that installs a
- * global low-level mouse hook, a known source of cursor lag in games.
- */
-function updateHover() {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  let state = 'none';
-  if (overlayWindow.isVisible()) {
-    if (overlayBusy && !overlayPinned) state = 'hit';
-    else {
-      const pt = screen.getCursorScreenPoint();
-      const b = overlayWindow.getBounds();
-      const x = pt.x - b.x, y = pt.y - b.y;
-      if (x >= 0 && x < b.width && y >= 0 && y < b.height) {
-        const onHotSpot = !overlayPinned && hitRegions.some((r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
-        state = onHotSpot ? 'hit' : 'body';
-      }
-    }
-  }
-  if (state === overlayHover) return;
-  const hadMouse = overlayHover === 'hit';
-  overlayHover = state;
-  if (hadMouse !== (state === 'hit')) overlayWindow.setIgnoreMouseEvents(state !== 'hit');
-  sendToWindows('overlay-hover', state);
-}
-
-function startHoverWatch() {
-  if (!hoverTimer) hoverTimer = setInterval(updateHover, HOVER_POLL_MS);
-}
-
-function stopHoverWatch() {
-  clearInterval(hoverTimer);
-  hoverTimer = null;
-}
-
-/**
- * Pinned: click-through even when hovered. Unpinned: takes the mouse while
- * the cursor is over it. Either way it never takes keyboard focus.
- */
-function setOverlayPinned(pinned) {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayPinned = pinned;
-  if (pinned) overlayBusy = false;
-  if (settings.get().overlay.locked !== pinned) settings.set('overlay.locked', pinned);
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-  // Unpinning a hidden overlay would look like nothing happened.
-  if (!pinned && !overlayWindow.isVisible()) {
-    showOverlay();
-    broadcastToAll('overlay-visibility-changed', true);
-  }
-  updateHover();
-  // `interactable` = "takes the mouse on hover" (the control window's chip
-  // and the overlay's header read it).
-  sendToWindows('interactable-changed', !pinned);
-  tray.setLocked?.(pinned);
-}
-
-function toggleOverlayPin() {
-  setOverlayPinned(!overlayPinned);
-}
-
-/** The overlay accepts drag / resize requests only while it has the mouse. */
-const overlayHasMouse = () => !overlayPinned && (overlayHover === 'hit' || overlayBusy);
-
-function saveWindowBounds() {
-  if (!overlayWindow) return;
-  const b = overlayWindow.getBounds();
-  settings.set('overlay.x', b.x);
-  settings.set('overlay.y', b.y);
-  settings.set('overlay.width', b.width);
-  settings.set('overlay.height', b.height);
 }
 
 // ─── IPC Handlers ───────────────────────────────────────────────────────────
@@ -326,13 +145,8 @@ function registerIPC() {
     assertTrustedSender(event);
     const safe = sanitizeSetting(keyPath, value);
     const updated = settings.set(safe.keyPath, safe.value);
-    if (safe.keyPath === 'overlay.visible') {
-      safe.value ? showOverlay() : hideOverlay();
-      broadcastToAll('overlay-visibility-changed', safe.value);
-    }
-    if (safe.keyPath === 'general.hotkey_toggle' || safe.keyPath === 'general.hotkey_interact') {
-      registerShortcuts();
-    }
+    if (safe.keyPath === 'window.alwaysOnTop') controlWindowModule.setAlwaysOnTop(safe.value);
+    if (safe.keyPath === 'general.hotkey_toggle') registerShortcuts();
     // Broadcast to all windows so they update in real-time
     broadcastToAll('settings-changed', updated);
     return updated;
@@ -343,100 +157,10 @@ function registerIPC() {
     return settings.reset();
   });
 
-  // ── Overlay controls ──────────────────────────────────────────────────────
-  // "Locked" in the IPC names = pinned (click-through even when hovered).
-  ipcMain.on('overlay:toggle-interact', (event) => {
-    if (!fromTrustedSender(event)) return;
-    toggleOverlayPin();
-  });
-  ipcMain.handle('overlay:set-locked', (event, locked) => {
-    assertTrustedSender(event);
-    if (typeof locked !== 'boolean') throw new Error('Invalid lock value');
-    setOverlayPinned(locked);
-    return overlayPinned;
-  });
-  // Resize grip and top-bar drag in the overlay (only while it has the mouse).
-  let saveBoundsTimer = null;
-  const saveBoundsSoon = () => {
-    clearTimeout(saveBoundsTimer);
-    saveBoundsTimer = setTimeout(saveWindowBounds, 300);
-  };
-  ipcMain.on('overlay:resize', (event, width, height) => {
-    if (!fromTrustedSender(event)) return;
-    if (!overlayWindow || overlayWindow.isDestroyed() || !overlayHasMouse()) return;
-    const w = Math.round(Number(width));
-    const h = Math.round(Number(height));
-    if (!Number.isFinite(w) || !Number.isFinite(h)) return;
-    const { x, y } = overlayWindow.getBounds();
-    overlayWindow.setBounds({ x, y, width: Math.min(Math.max(w, 260), 1600), height: Math.min(Math.max(h, 160), 2000) });
-    saveBoundsSoon();
-  });
-  ipcMain.on('overlay:move', (event, x, y) => {
-    if (!fromTrustedSender(event)) return;
-    if (!overlayWindow || overlayWindow.isDestroyed() || !overlayHasMouse()) return;
-    const nx = Math.round(Number(x));
-    const ny = Math.round(Number(y));
-    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
-    const { width, height } = overlayWindow.getBounds();
-    // Keep the top bar reachable on some display.
-    const onScreen = screen.getAllDisplays().some(({ workArea: a }) =>
-      nx + width > a.x + 40 && nx < a.x + a.width - 40 && ny >= a.y - 10 && ny < a.y + a.height - 30);
-    if (!onScreen) return;
-    overlayWindow.setBounds({ x: nx, y: ny, width, height });
-    saveBoundsSoon();
-  });
-  // A drag or resize is in progress: keep taking the mouse even if the
-  // cursor runs ahead of the window.
-  ipcMain.on('overlay:busy', (event, busy) => {
-    if (!fromTrustedSender(event)) return;
-    overlayBusy = busy === true && !overlayPinned;
-    updateHover();
-  });
-  // The overlay's hot spots (rectangles that take the mouse), in window DIP.
-  ipcMain.on('overlay:hit-regions', (event, regions) => {
-    if (!fromTrustedSender(event) || event.sender !== overlayWindow?.webContents) return;
-    if (!Array.isArray(regions) || regions.length > 32) return;
-    const safe = [];
-    for (const r of regions) {
-      const v = [r?.x, r?.y, r?.w, r?.h].map(Number);
-      if (!v.every(Number.isFinite) || v[2] <= 0 || v[3] <= 0) continue;
-      safe.push({ x: v[0], y: v[1], w: v[2], h: v[3] });
-    }
-    hitRegions = safe;
-    updateHover();
-  });
-  ipcMain.handle('overlay:get-locked', (event) => {
-    assertTrustedSender(event);
-    return overlayPinned;
-  });
-  ipcMain.handle('overlay:get-hover', (event) => {
-    assertTrustedSender(event);
-    return overlayHover;
-  });
   ipcMain.handle('hotkeys:status', (event) => {
     assertTrustedSender(event);
     return hotkeyStatus;
   });
-  ipcMain.on('overlay:toggle-visibility', (event) => {
-    if (!fromTrustedSender(event)) return;
-    if (!overlayWindow) return;
-    const nowVisible = !overlayWindow.isVisible();
-    nowVisible ? showOverlay() : hideOverlay();
-    broadcastToAll('overlay-visibility-changed', nowVisible);
-  });
-  ipcMain.handle('overlay:get-visible', (event) => {
-    assertTrustedSender(event);
-    return overlayWindow?.isVisible() ?? false;
-  });
-  ipcMain.handle('overlay:set-visible', (event, visible) => {
-    assertTrustedSender(event);
-    if (typeof visible !== 'boolean') throw new Error('Invalid visibility value');
-    if (!overlayWindow) return false;
-    visible ? showOverlay() : hideOverlay();
-    broadcastToAll('overlay-visibility-changed', visible);
-    return visible;
-  });
-
   // ── Log watcher ───────────────────────────────────────────────────────────
   ipcMain.on('log-watcher:restart', (event) => {
     if (!fromTrustedSender(event)) return;
@@ -567,14 +291,12 @@ function registerIPC() {
 // ─── Global Shortcuts ───────────────────────────────────────────────────────
 
 function registerShortcuts() {
-  const s = settings.get();
-  const { hotkey_toggle, hotkey_interact } = s.general;
+  const { hotkey_toggle } = settings.get().general;
 
   globalShortcut.unregisterAll();
 
   // globalShortcut.register() returns false (it doesn't throw) when another
-  // app already owns the combination — previously that failed silently and
-  // left the overlay impossible to unlock from the keyboard.
+  // app already owns the combination — report it instead of failing silently.
   const tryRegister = (key, fn) => {
     if (!key) return null;
     let ok = false;
@@ -587,14 +309,8 @@ function registerShortcuts() {
     return { key, ok };
   };
 
-  hotkeyStatus.toggle = tryRegister(hotkey_toggle, () => {
-    if (!overlayWindow) return;
-    const nowVisible = !overlayWindow.isVisible();
-    nowVisible ? showOverlay() : hideOverlay();
-    broadcastToAll('overlay-visibility-changed', nowVisible);
-  });
-
-  hotkeyStatus.interact = tryRegister(hotkey_interact, toggleOverlayPin);
+  // Show / hide the window from inside Arena.
+  hotkeyStatus.toggle = tryRegister(hotkey_toggle, controlWindowModule.toggleControlWindow);
   sendToWindows('hotkeys-status', hotkeyStatus);
 }
 
@@ -684,31 +400,19 @@ app.whenReady().then(() => {
   require('./logParser').setSetCodeResolver(landsData.inferSetFromGrpIds);
   require('./logParser').setGameHandler(assistantManager.handleGameMessage);
 
-  createOverlayWindow();
   assistantManager.init(sendToWindows);
   const controlWindow = controlWindowModule.createControlWindow();
   registerIPC();
   registerUpdateIPC();
   registerShortcuts();
-  tray.create(overlayWindow, controlWindow, {
-    toggleLock: toggleOverlayPin,
-    showOverlay,
-    hideOverlay,
-    onVisibilityChanged: (v) => broadcastToAll('overlay-visibility-changed', v),
-  });
+  tray.create(controlWindow);
 
-  // Start log watcher once overlay is loaded
-  overlayWindow.webContents.once('did-finish-load', () => {
+  // Start the log watcher once the window can receive its events.
+  controlWindow.webContents.once('did-finish-load', () => {
     logWatcher.startWatching(broadcastToAll);
   });
 
-  // Auto-show overlay when draft starts (if setting enabled)
-  // Auto-hide when draft ends
-  // These are handled by the log watcher broadcasting draft-started/draft-ended
-
-  app.on('activate', () => {
-    if (!overlayWindow) createOverlayWindow();
-  });
+  app.on('activate', () => controlWindowModule.showControlWindow());
 
   // Setup auto-updater in packaged mode
   if (app.isPackaged) {
@@ -719,7 +423,6 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   logWatcher.stopWatching();
-  stopHoverWatch();
   tray.destroy();
   appLogger.log('main', 'info', 'App shutting down');
 });

@@ -3,9 +3,7 @@ const path = require('path');
 
 let tray = null;
 let statusText = 'Watching for Arena...';
-let actions = {};        // { toggleLock, showOverlay, hideOverlay, onVisibilityChanged }
-let overlayLocked = true;
-let windows = { overlay: null, control: null };
+let windows = { control: null };
 
 function createTrayIcon() {
   const iconPath = path.join(app.getAppPath(), 'assets', 'tray-icon.png');
@@ -28,13 +26,12 @@ function createTrayIcon() {
   return icon;
 }
 
-function create(overlayWindow, controlWindow, opts = {}) {
-  actions = opts;
-  windows = { overlay: overlayWindow, control: controlWindow };
+function create(controlWindow) {
+  windows = { control: controlWindow };
   const icon = createTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip('Arena Overlay');
-  updateMenu(overlayWindow, controlWindow);
+  updateMenu(controlWindow);
 
   // Single left-click: show control window
   tray.on('click', () => {
@@ -51,18 +48,12 @@ function create(overlayWindow, controlWindow, opts = {}) {
   return tray;
 }
 
-/** Keep the Lock/Unlock menu label in sync with the overlay. */
-function setLocked(locked) {
-  overlayLocked = locked;
-  if (tray) updateMenu(windows.overlay, windows.control);
-}
-
-function updateStatus(text, overlayWindow, controlWindow) {
+function updateStatus(text, controlWindow = windows.control) {
   statusText = text;
-  if (tray && overlayWindow) updateMenu(overlayWindow, controlWindow);
+  if (tray) updateMenu(controlWindow);
 }
 
-function updateMenu(overlayWindow, controlWindow) {
+function updateMenu(controlWindow = windows.control) {
   if (!tray) return;
 
   const contextMenu = Menu.buildFromTemplate([
@@ -72,28 +63,13 @@ function updateMenu(overlayWindow, controlWindow) {
     },
     { type: 'separator' },
     {
-      label: 'Show Control Window',
+      label: 'Show Window',
       click: () => {
         if (controlWindow && !controlWindow.isDestroyed()) {
           controlWindow.show();
           controlWindow.focus();
         }
       },
-    },
-    {
-      label: 'Show / Hide Overlay',
-      click: () => {
-        if (overlayWindow && !overlayWindow.isDestroyed()) {
-          const nowVisible = !overlayWindow.isVisible();
-          if (nowVisible) (actions.showOverlay ?? (() => overlayWindow.showInactive()))();
-          else (actions.hideOverlay ?? (() => overlayWindow.hide()))();
-          actions.onVisibilityChanged?.(nowVisible);
-        }
-      },
-    },
-    {
-      label: overlayLocked ? 'Unpin Overlay (movable by its top bar)' : 'Pin Overlay (fully click-through)',
-      click: () => actions.toggleLock?.(),
     },
     { type: 'separator' },
     {
@@ -128,4 +104,4 @@ function destroy() {
   }
 }
 
-module.exports = { create, updateStatus, updateMenu, setLocked, destroy };
+module.exports = { create, updateStatus, updateMenu, destroy };

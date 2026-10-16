@@ -4,7 +4,7 @@
  *   - Dev mode is decided only by whether the app is packaged. (An env var
  *     used to switch an installed build into dev mode, where it would load —
  *     and trust — whatever happened to be listening on localhost:5173.)
- *   - Production trusts exactly our two bundled pages, not any file: URL.
+ *   - Production trusts exactly our bundled page, not any file: URL.
  *   - Windows never navigate or open popups; allowed external links go to
  *     the user's browser.
  */
@@ -18,7 +18,6 @@ const DEV_ORIGIN = 'http://localhost:5173';
 
 const RENDERER_DIR = path.join(__dirname, '..', '..', 'dist', 'renderer');
 const APP_PAGES = new Set([
-  pathToFileURL(path.join(RENDERER_DIR, 'index.html')).href,
   pathToFileURL(path.join(RENDERER_DIR, 'control', 'index.html')).href,
 ]);
 

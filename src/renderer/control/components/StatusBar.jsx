@@ -36,43 +36,7 @@ const SET_NAMES = {
   TLA: 'Avatar: The Last Airbender', TMT: 'Teenage Mutant Ninja Turtles',
 };
 
-// Click to pin/unpin — works even when the hotkey is taken by another app.
-// isInteractable = not pinned (the overlay's top bar and corner take the mouse).
-function OverlayLockChip({ isInteractable, hotkey }) {
-  const color = isInteractable ? '#5cc8ff' : '#7a7a7a';
-  const bg = isInteractable ? 'rgba(92,200,255,0.18)' : 'rgba(255,255,255,0.04)';
-  const border = isInteractable ? 'rgba(92,200,255,0.55)' : 'rgba(255,255,255,0.12)';
-  const label = isInteractable ? 'OVERLAY: CLICK-THROUGH EXCEPT TOP BAR — click to pin' : 'OVERLAY: PINNED (fully click-through) — click to unpin';
-  const hotkeyNote = !hotkey?.key ? ''
-    : hotkey.ok ? ` (or press ${hotkey.key})`
-    : `. The ${hotkey.key} hotkey could not be registered — another app is using it; change it in Settings.`;
-  return (
-    <button
-      onClick={() => window.electronAPI?.setOverlayLocked?.(isInteractable)}
-      title={(isInteractable
-        ? 'Only the overlay’s top bar and bottom-right corner take the mouse (move / resize); everything else lets clicks through to Arena. Click to pin it (clicks pass through everywhere)'
-        : 'Clicks pass through the whole overlay to Arena. Click to unpin it (top bar and corner become movable / resizable again)') + hotkeyNote}
-      style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      padding: '2px 8px', borderRadius: 4,
-      background: bg, border: `1px solid ${border}`,
-      fontSize: 10, fontWeight: 700, color, letterSpacing: '0.04em',
-      flexShrink: 0, cursor: 'pointer', fontFamily: 'inherit',
-    }}>
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
-        {isInteractable ? (
-          <path d="M7 11V7a5 5 0 019.9-1M4 11h16v10H4z" stroke={color} strokeWidth="2.5" fill="none" strokeLinecap="round" />
-        ) : (
-          <path d="M7 11V7a5 5 0 0110 0v4M4 11h16v10H4z" stroke={color} strokeWidth="2.5" fill="none" strokeLinecap="round" />
-        )}
-      </svg>
-      {label}
-      {hotkey && !hotkey.ok && <span style={{ color: '#e0a030' }} title={`${hotkey.key} is in use by another app`}>⚠</span>}
-    </button>
-  );
-}
-
-export default function StatusBar({ status, draftState, watcherRunning, isInteractable, interactHotkey }) {
+export default function StatusBar({ status, draftState, watcherRunning }) {
   const { inDraft, setCode, packNumber, pickNumber, format } = draftState;
   const statusLabel = STATUS_LABELS[status] ?? status ?? 'Watching...';
   const statusColor = STATUS_COLORS[status] ?? '#888';
@@ -101,9 +65,6 @@ export default function StatusBar({ status, draftState, watcherRunning, isIntera
           ? `Draft active: ${setName} — ${formatName}`
           : statusLabel}
       </span>
-
-      {/* Overlay lock state — visible regardless of draft state */}
-      <OverlayLockChip isInteractable={!!isInteractable} hotkey={interactHotkey} />
 
       {/* Pack/pick info when in draft */}
       {inDraft && (
