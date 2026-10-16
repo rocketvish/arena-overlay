@@ -33,6 +33,34 @@ Checked with `win-policy.js` on held-out drafts (games and drafts held out by dr
 Pure win value (no blend) loses to imitation once the judge is independent — it chases its
 own noise — so keep λ > 0. Observational evidence, not a controlled experiment.
 
+## Recency
+
+Formats drift: the field learns which commons are good. `recency-research.js` predicts a set's
+last week from the weeks before. Weighting later drafts more helped on HOB, SOS and ECL: the
+pick model is best with a ~10-day half-life (+0.3–0.6 points top-1 on the last week); average
+pick and wheel rates drift faster and are best at ~4 days (average-pick error down ~60%).
+`build-set.js` uses those (`PICK_HALF_LIFE_DAYS`, `STATS_HALF_LIFE_DAYS`). Whole-period
+held-out agreement dips slightly as a result — the trade is deliberate.
+
+```sh
+node --max-old-space-size=12000 tools/pipeline/recency-research.js HOB --half-lives off,10,7,4
+```
+
+## Pack-2 forecast
+
+Pack 2 is passed from the left; in pack 1 the cards missing from your returning packs went to
+the left side. `pack2-research.js` checks whether that predicts what reaches you in pack 2:
+it does (HOB / SOS / ECL), about 1.4× as much per unit as the ordinary pack-1 signal, which
+the overlay now adds to its pack-2 color signals (`LEFT_TAKE_WEIGHT` in `signalAnalyzer.js`).
+
+## Quick Draft
+
+17Lands publishes no Quick Draft datasets, so tables are Premier-only. In a Quick Draft the
+app fetches 17Lands' live Quick Draft card ratings (current sets only) and uses the bots'
+pick / last-seen positions for signals and wheel odds, plus each color's shift vs Premier
+(the bots' standing color bias) for the win model's expected future picks. That part is
+reasoned, not validated — there's no Quick Draft outcome data to test it on.
+
 ```sh
 node --max-old-space-size=8192 tools/pipeline/win-research.js HOB          # held-out game prediction
 node --max-old-space-size=12000 tools/pipeline/win-policy.js HOB --taus 0.05 --lambdas 0.01,0.02

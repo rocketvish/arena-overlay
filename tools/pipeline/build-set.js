@@ -39,6 +39,12 @@ const POD_SIZE = 8;
 const TOP_WR_BUCKET = 0.6;
 const TOP_MIN_GAMES_BUCKET = 50;
 const EVAL_FRACTION = 10; // 1 in 10 top-player drafts is held out
+// Recency half-lives, from tools/pipeline/recency-research.js (predicting the
+// last week of HOB / SOS / ECL from the weeks before): the pick model is best
+// at ~10 days; average pick and wheel rates drift faster and are best at ~4
+// (ATA error down ~60% vs unweighted).
+const PICK_HALF_LIFE_DAYS = 10;
+const STATS_HALF_LIFE_DAYS = 4;
 
 // ─── Args / IO ────────────────────────────────────────────────────────────────
 
@@ -200,12 +206,23 @@ function hashId(s) {
   return h >>> 0;
 }
 
+const dayOf = (ts) => Math.floor(Date.parse(String(ts).replace(' ', 'T') + 'Z') / 86400000);
+
 async function draftPass(file, nCards, cardIndexOf) {
-  const ataSum = new Float64Array(nCards), ataN = new Float64Array(nCards);
-  const wheelObs = Array.from({ length: 6 }, () => new Float64Array(nCards));
-  const wheelHit = Array.from({ length: 6 }, () => new Float64Array(nCards));
+  // ATA and wheel counts are kept per day so they can be weighted by recency
+  // afterwards (see collapseDays).
+  const byDay = new Map(); // day → { ataSum, ataN, wheelObs[6], wheelHit[6] }
+  const dayStats = (day) => {
+    let d = byDay.get(day);
+    if (!d) {
+      const z = () => new Float64Array(nCards);
+      d = { ataSum: z(), ataN: z(), wheelObs: Array.from({ length: 6 }, z), wheelHit: Array.from({ length: 6 }, z) };
+      byDay.set(day, d);
+    }
+    return d;
+  };
   // Top-player picks for model training / evaluation.
-  const train = { pool: new Ragged(), pack: new Ragged(), taken: [], pickNo: [] };
+  const train = { pool: new Ragged(), pack: new Ragged(), taken: [], pickNo: [], day: [] };
   const evalDrafts = [];
   let cols = null, drafts = 0, picks = 0, packSize = null;
 
@@ -214,6 +231,9 @@ async function draftPass(file, nCards, cardIndexOf) {
     if (!curRows.length) return;
     drafts++;
     const top = curRows[0].top;
+    const day = curRows[0].day;
+    const { ataSum, ataN, wheelObs, wheelHit } = dayStats(Number.isFinite(day) ? day : 0);
+    for (const r of curRows) if (r.taken != null) { ataSum[r.taken] += r.pickNo + 1; ataN[r.taken]++; }
     // Wheel observations: the pack seen at pick p (0-based) returns at p + 8.
     const byKey = new Map(curRows.map((r) => [r.packNo * 100 + r.pickNo, r]));
     for (const r of curRows) {
@@ -234,11 +254,11 @@ async function draftPass(file, nCards, cardIndexOf) {
     if (top) {
       const held = hashId(curId) % EVAL_FRACTION === 0;
       if (held) {
-        if (evalDrafts.length < 3000) evalDrafts.push({ id: curId, picks: curRows.map((r) => ({ p: r.packNo, i: r.pickNo, cards: r.pack, taken: r.taken })) });
+        if (evalDrafts.length < 3000) evalDrafts.push({ id: curId, day, picks: curRows.map((r) => ({ p: r.packNo, i: r.pickNo, cards: r.pack, taken: r.taken })) });
       } else {
         for (const r of curRows) {
           train.pool.push(r.pool); train.pack.push(r.pack);
-          train.taken.push(r.taken); train.pickNo.push(r.packNo * 15 + r.pickNo);
+          train.taken.push(r.taken); train.pickNo.push(r.packNo * 15 + r.pickNo); train.day.push(day);
         }
       }
     }
@@ -250,6 +270,7 @@ async function draftPass(file, nCards, cardIndexOf) {
       cols = {
         id: header.indexOf('draft_id'), packNo: header.indexOf('pack_number'), pickNo: header.indexOf('pick_number'),
         pick: header.indexOf('pick'), wr: header.indexOf('user_game_win_rate_bucket'), ng: header.indexOf('user_n_games_bucket'),
+        time: header.indexOf('draft_time'),
         pack: [], pool: [],
       };
       header.forEach((h, i) => {
@@ -268,16 +289,33 @@ async function draftPass(file, nCards, cardIndexOf) {
     };
     const pack = expand(cols.pack);
     if (pickNo === 0 && packSize == null) packSize = pack.length;
-    if (taken != null) { ataSum[taken] += pickNo + 1; ataN[taken]++; }
     picks++;
     curRows.push({
-      packNo, pickNo, taken, pack,
+      packNo, pickNo, taken, pack, day: dayOf(row[cols.time]),
       pool: expand(cols.pool),
       top: Number(row[cols.wr]) >= TOP_WR_BUCKET && Number(row[cols.ng]) >= TOP_MIN_GAMES_BUCKET,
     });
   }
   flush();
-  return { ataSum, ataN, wheelObs, wheelHit, train, evalDrafts, drafts, picks, packSize };
+  const days = [...byDay.keys()];
+  return { byDay, lastDay: Math.max(...days), firstDay: Math.min(...days), train, evalDrafts, drafts, picks, packSize, nCards };
+}
+
+/**
+ * Sum the per-day ATA / wheel counts with weight(day) (e.g. a recency decay;
+ * days the weight function skips with 0 drop out).
+ */
+function collapseDays(d, weight = () => 1) {
+  const z = () => new Float64Array(d.nCards);
+  const out = { ataSum: z(), ataN: z(), wheelObs: Array.from({ length: 6 }, z), wheelHit: Array.from({ length: 6 }, z) };
+  for (const [day, s] of d.byDay) {
+    const w = weight(day);
+    if (!w) continue;
+    const add = (dst, src) => { for (let c = 0; c < src.length; c++) dst[c] += w * src[c]; };
+    add(out.ataSum, s.ataSum); add(out.ataN, s.ataN);
+    for (let p = 0; p < 6; p++) { add(out.wheelObs[p], s.wheelObs[p]); add(out.wheelHit[p], s.wheelHit[p]); }
+  }
+  return out;
 }
 
 // ─── Pick model ───────────────────────────────────────────────────────────────
@@ -293,13 +331,14 @@ async function draftPass(file, nCards, cardIndexOf) {
  * floats per card, microseconds per prediction — cheap enough to run on every
  * pack inside the overlay. Trained with AdaGrad on top-player picks.
  */
-function trainPickModel(train, nCards, { dim = 16, epochs = 4, lr = 0.05, l2 = 1e-6, log = console.log } = {}) {
+function trainPickModel(train, nCards, { dim = 16, epochs = 4, lr = 0.05, l2 = 1e-6, rows = null, weight = null, log = console.log } = {}) {
   const b = new Float64Array(nCards);
   const u = new Float64Array(nCards * dim).map(() => (Math.random() - 0.5) * 0.02);
   const v = new Float64Array(nCards * dim).map(() => (Math.random() - 0.5) * 0.02);
   const gb = new Float64Array(nCards).fill(1e-8), gu = new Float64Array(nCards * dim).fill(1e-8), gv = new Float64Array(nCards * dim).fill(1e-8);
-  const n = train.taken.length;
-  const order = Uint32Array.from({ length: n }, (_, i) => i);
+  // rows: subset of training rows to use; weight(row) scales each pick's gradient.
+  const order = rows ? Uint32Array.from(rows) : Uint32Array.from({ length: train.taken.length }, (_, i) => i);
+  const n = order.length;
   const h = new Float64Array(dim), dh = new Float64Array(dim);
 
   for (let ep = 0; ep < epochs; ep++) {
@@ -325,9 +364,10 @@ function trainPickModel(train, nCards, { dim = 16, epochs = 4, lr = 0.05, l2 = 1
       counted++;
       if (logits[ti] === mx) hits++;
       dh.fill(0);
+      const wt = weight ? weight(idx) : 1;
       for (let k = 0; k < pack.length; k++) {
         const c = pack[k];
-        const g = ex[k] / Z - (k === ti ? 1 : 0);
+        const g = wt * (ex[k] / Z - (k === ti ? 1 : 0));
         gb[c] += g * g; b[c] -= lr * g / Math.sqrt(gb[c]);
         for (let d = 0; d < dim; d++) {
           const j = c * dim + d;
@@ -382,6 +422,21 @@ function modelTop1(model, nCards, drafts, cardIdx) {
 
 const r4 = (x) => Math.round(x * 1e4) / 1e4;
 
+/** Card index = the draft dataset's pack_card column order (stable per file). */
+async function readCardIndex(draftFile) {
+  const names = [];
+  const indexByName = new Map();
+  for await (const { header } of readCsvGz(draftFile)) {
+    for (const h of header) {
+      if (!h.startsWith('pack_card_')) continue;
+      const key = normCardName(h.slice(10));
+      if (key && !indexByName.has(key)) { indexByName.set(key, names.length); names.push(h.slice(10)); }
+    }
+    break;
+  }
+  return { names, indexByName };
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const t0 = Date.now();
@@ -391,21 +446,7 @@ async function main() {
   const draft = await ensureDataset('draft_data', args.set, args.format, args.cache);
   const game = await ensureDataset('game_data', args.set, args.format, args.cache);
 
-  // Card index = dataset column order; map each to an Arena grpId.
-  const names = [];
-  const indexByName = new Map();
-  const cardIndexOf = (name) => {
-    const key = normCardName(name);
-    if (!key) return null;
-    let i = indexByName.get(key);
-    if (i === undefined) { i = names.length; names.push(name); indexByName.set(key, i); }
-    return i;
-  };
-  // Seed the index from the draft header so indices are stable.
-  for await (const { header } of readCsvGz(draft.file)) {
-    for (const h of header) if (h.startsWith('pack_card_')) cardIndexOf(h.slice(10));
-    break;
-  }
+  const { names, indexByName } = await readCardIndex(draft.file);
   const nCards = names.length;
   const unmapped = names.filter((nm) => !cardList.has(normCardName(nm)));
   console.log(`  ${nCards} cards in dataset; ${unmapped.length} without an Arena id${unmapped.length ? ': ' + unmapped.slice(0, 5).join(', ') : ''}`);
@@ -425,7 +466,12 @@ async function main() {
   console.log(`    ${d.drafts} drafts, ${d.picks} picks, pack size ${d.packSize}; ${d.train.taken.length} top-player training picks, ${d.evalDrafts.length} held-out drafts`);
 
   console.log('  training pick model…');
-  const model = trainPickModel(d.train, nCards, { dim: args.dim, epochs: args.epochs });
+  // Recency: the field (and top players) learn a format over its life, so
+  // later drafts count more.
+  const decay = (halfLife) => (day) => 0.5 ** ((d.lastDay - day) / halfLife);
+  const agg = collapseDays(d, decay(STATS_HALF_LIFE_DAYS));
+  const pickWeight = decay(PICK_HALF_LIFE_DAYS);
+  const model = trainPickModel(d.train, nCards, { dim: args.dim, epochs: args.epochs, weight: (i) => pickWeight(d.train.day[i]) });
   const evalRes = modelTop1(model, nCards, d.evalDrafts);
   console.log(`  held-out top-1 agreement: model ${(100 * evalRes.top1).toFixed(1)}%  (card bias only: ${(100 * evalRes.baseTop1).toFixed(1)}%) over ${evalRes.picks} picks`);
 
@@ -450,7 +496,8 @@ async function main() {
     for (const [pair, pp] of Object.entries(g.pairs)) {
       if (pp.n[c] >= 20) pairs[pair] = [r4(pp.w[c] / pp.n[c]), pp.n[c]];
     }
-    const wheel = d.wheelObs.map((obs, p) => (obs[c] >= 30 ? r4(d.wheelHit[p][c] / obs[c]) : null));
+    // Weighted counts: ≥ 30 effective observations for a measured rate.
+    const wheel = agg.wheelObs.map((obs, p) => (obs[c] >= 30 ? r4(agg.wheelHit[p][c] / obs[c]) : null));
     cards[meta.mtgaId] = {
       name: meta.name, color: meta.color, rarity: meta.rarity, types: meta.types,
       order: meta.order, // position in 17Lands' card list ≈ collector number (Arena pack sort)
@@ -458,7 +505,7 @@ async function main() {
       oh: rate(g.agg.ohW[c], g.agg.ohN[c]), ohN: g.agg.ohN[c],
       gp: rate(g.agg.gpW[c], g.agg.gpN[c]), gpN: g.agg.gpN[c],
       gns: rate(g.agg.gnsW[c], g.agg.gnsN[c]),
-      ata: d.ataN[c] > 0 ? Math.round((d.ataSum[c] / d.ataN[c]) * 100) / 100 : null,
+      ata: agg.ataN[c] > 0 ? Math.round((agg.ataSum[c] / agg.ataN[c]) * 100) / 100 : null,
       pairs, wheel,
     };
     modelOrder.push([meta.mtgaId, c]);
@@ -517,4 +564,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });
 }
 
-module.exports = { trainPickModel, pairKey, hashId, loadCardList, ensureDataset };
+module.exports = { trainPickModel, draftPass, collapseDays, pairKey, hashId, loadCardList, ensureDataset, readCardIndex };

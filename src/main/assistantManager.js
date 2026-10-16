@@ -76,16 +76,20 @@ async function loadLandsMap(setCode) {
  * Card stats + archetype win rates + the per-set table derived from 17Lands'
  * public datasets (pick model, per-pair GIH WR, wheel rates) when published.
  */
-async function loadSetMetrics(setCode) {
-  const [cards, ratings, table] = await Promise.all([
+async function loadSetMetrics(setCode, format = null) {
+  const quickDraft = format === 'QuickDraft';
+  const [cards, ratings, table, quick] = await Promise.all([
     landsData.fetchSetData(setCode).then(r => r?.data ?? null),
     landsData.fetchColorRatings(setCode).catch(() => null),
     setData.loadSetTable(setCode).catch(() => null),
+    // Quick Draft: how the bots draft (pick / last-seen positions).
+    quickDraft ? landsData.fetchQuickDraftStats(setCode).catch(() => null) : null,
   ]);
   if (!cards) return null;
   // Live 17Lands archetype data first; the public-data table can stand in.
   const metrics = signalAnalyzer.computeSetMetrics(cards, ratings ?? (table?.pairs ? { pairs: table.pairs } : null));
   metrics.table = table;
+  metrics.bots = quick ? signalAnalyzer.computeBotProfile(cards, quick) : null;
   return metrics;
 }
 
@@ -168,7 +172,7 @@ async function processEvent(channel, data) {
 
     const { setCode } = data;
     if (setCode) {
-      loadSetMetrics(setCode).then(metrics => {
+      loadSetMetrics(setCode, data.format).then(metrics => {
         // Ignore if a different draft has started meanwhile.
         if (!metrics || draftTracker.getState().setCode !== setCode) return;
         draftTracker.setSetMetrics(metrics);
@@ -255,7 +259,7 @@ async function processEvent(channel, data) {
 function reloadSetMetrics(setCode) {
   queue = queue.then(async () => {
     if (!setCode || draftTracker.getState().setCode !== setCode) return;
-    const metrics = await loadSetMetrics(setCode);
+    const metrics = await loadSetMetrics(setCode, draftTracker.getState().format);
     if (!metrics) return;
     draftTracker.setSetMetrics(metrics);
     reanalyze(pendingPackCards);

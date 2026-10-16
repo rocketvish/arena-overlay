@@ -334,6 +334,7 @@ function DeckStatsPanel({ composition, manaAnalysis, deckGrade, archetype }) {
 const INSIGHT_TONE_META = {
   flowing: { color: '#7ec8a0', icon: '◆' },
   cut:     { color: '#e08080', icon: '◇' },
+  bots:    { color: '#8fb8ff', icon: '⚙' },
   neutral: { color: '#a8a8a8', icon: '◈' },
 };
 

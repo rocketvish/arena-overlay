@@ -132,8 +132,39 @@ function cardZ(card, setMetrics) {
 /**
  * Pick number (1-based) at which 17Lands drafters typically take the card.
  * Falls back to ALSA (average last seen at) for data that predates ATA.
+ * In Quick Draft the baseline is Quick Draft's own pick data: the other
+ * seats are bots, and a card the bots always pass isn't a signal.
  */
-const typicalPick = (card) => card?.stats?.ata ?? card?.stats?.alsa ?? null;
+const typicalPick = (card, setMetrics = null) => {
+  const bot = setMetrics?.bots?.byCard?.get(card?.grpId);
+  return bot?.ata ?? bot?.alsa ?? card?.stats?.ata ?? card?.stats?.alsa ?? null;
+};
+
+/**
+ * Quick Draft bot profile from 17Lands' Quick Draft pick data: per card its
+ * pick / last-seen positions there, and per color how much later (+) or
+ * earlier (−) its cards are last seen than in Premier Draft — the bots'
+ * standing color bias. `cards` are the set's (Premier) cards.
+ */
+const BOT_SHIFT_MIN_CARDS = 8;
+function computeBotProfile(cards, quick) {
+  const byCard = new Map();
+  const sums = Object.fromEntries(COLORS.map((c) => [c, [0, 0]]));
+  for (const c of cards ?? []) {
+    const q = quick?.cards?.[c.mtgaId];
+    if (!q) continue;
+    byCard.set(c.mtgaId, q);
+    const colors = cardColorsOf(c);
+    if (colors.length !== 1 || q.alsa == null || c.stats?.alsa == null) continue;
+    sums[colors][0] += q.alsa - c.stats.alsa;
+    sums[colors][1]++;
+  }
+  const colorShift = Object.fromEntries(COLORS.map((c) => {
+    const [sum, n] = sums[c];
+    return [c, n >= BOT_SHIFT_MIN_CARDS ? Math.round((sum / n) * 100) / 100 : 0];
+  }));
+  return byCard.size ? { byCard, colorShift } : null;
+}
 
 /**
  * Card quality in [0,1]: Φ(z). An average card scores 0.5, A+ ≈ 0.98, F ≈ 0.02.
@@ -167,7 +198,7 @@ function signalLabel(score) {
  * 17Lands drafters normally take it. Only playable cards count.
  */
 function lateness(card, pickNumber, setMetrics) {
-  const ata = typicalPick(card);
+  const ata = typicalPick(card, setMetrics);
   if (ata == null) return 0;
   const z = cardZ(card, setMetrics);
   if (z == null || z < -0.5) return 0;            // nobody is signalling with chaff
@@ -184,7 +215,37 @@ function lateness(card, pickNumber, setMetrics) {
  * color, then compare colors against each other. Packs from earlier rounds
  * count less: pack 2 passes the other way, and the table shifts over time.
  */
-function computeColorSignals(packHistory, setMetrics, confidenceThreshold, currentPackNumber = null) {
+/**
+ * Pack 2 is passed from the left. In pack 1 the left side's picks are
+ * visible: when one of your early packs comes back, the missing cards went
+ * to them. Quality-weighted color totals of those cards (Φ(z) per card).
+ * Tested on 17Lands drafts (tools/pipeline/pack2-research.js, HOB / SOS /
+ * ECL): more of a color taken this way → less of it reaches you in pack 2,
+ * worth about 1.4× the pack-1 lateness signal per unit.
+ */
+const LEFT_TAKE_WEIGHT = 1.4;
+function leftSideTakes(packHistory, pickHistory, setMetrics) {
+  const out = Object.fromEntries(COLORS.map((c) => [c, 0]));
+  const counts = Object.fromEntries(COLORS.map((c) => [c, 0]));
+  let cards = 0, wheels = 0;
+  for (let i = 0; i <= 5; i++) {
+    const r = computeWheelReport(packHistory, pickHistory ?? [], { packNumber: 0, pickNumber: i + POD_SIZE });
+    if (!r) continue;
+    wheels++;
+    const byId = new Map((packHistory.find((p) => p.packNumber === 0 && p.pickNumber === i)?.cards ?? []).map((c) => [c.grpId, c]));
+    for (const t of r.taken) {
+      const card = byId.get(t.grpId);
+      const colors = t.color;
+      if (!colors) continue;
+      cards++;
+      const q = card ? cardQuality(card, setMetrics) : 0.3;
+      for (const ch of colors) { out[ch] += q / colors.length; counts[ch]++; }
+    }
+  }
+  return wheels ? { byColor: out, counts, cards, wheels } : null;
+}
+
+function computeColorSignals(packHistory, setMetrics, confidenceThreshold, currentPackNumber = null, pickHistory = null) {
   const threshold = confidenceThreshold ?? 4;
   const lastPack = currentPackNumber ?? packHistory[packHistory.length - 1]?.packNumber ?? 0;
 
@@ -210,11 +271,16 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
       for (const c of colors) {
         raw[c] += (l * weight) / colors.length;
         if (!best[c] || l > best[c].l) {
-          best[c] = { l, name: card.name ?? `#${card.grpId}`, pick: pack.pickNumber + 1, ata: typicalPick(card), packNumber: pack.packNumber + 1 };
+          best[c] = { l, name: card.name ?? `#${card.grpId}`, pick: pack.pickNumber + 1, ata: typicalPick(card, setMetrics), packNumber: pack.packNumber + 1 };
         }
       }
     }
   }
+
+  // Pack 2 comes from the left: what the left side took in pack 1 counts
+  // against a color, on the same footing as the pack-1 signal (weight 0.4).
+  const left = lastPack === 1 ? leftSideTakes(packHistory, pickHistory, setMetrics) : null;
+  if (left) for (const c of COLORS) raw[c] -= 0.4 * LEFT_TAKE_WEIGHT * left.byColor[c];
 
   const hasData = informativePacks >= threshold;
   // Compare each color with the *median* color: one very open color shouldn't
@@ -226,8 +292,8 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
   const signals = {};
   for (const color of COLORS) {
     let score = 50;
-    if (hasData && total > 0) {
-      const rel = (raw[color] - median) / Math.max(median, 1);
+    if (hasData && (total > 0 || left)) {
+      const rel = (raw[color] - median) / Math.max(Math.abs(median), 1);
       score = Math.round(Math.max(0, Math.min(100, 50 + 20 * rel)));
     }
     const b = best[color];
@@ -239,6 +305,8 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
     } else {
       evidence = 'Nothing good has arrived later than usual';
     }
+    const leftTook = left?.counts[color] ?? 0;
+    if (hasData && leftTook >= 2) evidence += ` · the left side took ${leftTook} of its cards from your pack-1 packs`;
     signals[color] = {
       score,
       label: signalLabel(score),
@@ -491,7 +559,8 @@ function computeSignalInsights(trackerState, currentPackNumber, currentPickNumbe
   if (!packHistory || packHistory.length === 0) return [];
   if (currentPickNumber < 3) return [];
 
-  const neighborLabel = currentPackNumber === 1 ? 'player on your left' : 'player on your right';
+  const seat = setMetrics?.bots ? 'bot' : 'player';
+  const neighborLabel = currentPackNumber === 1 ? `${seat} on your left` : `${seat} on your right`;
   const packs = packHistory.filter(p => p.packNumber === currentPackNumber && p.pickNumber >= 1);
   const insights = [];
 
@@ -505,9 +574,9 @@ function computeSignalInsights(trackerState, currentPackNumber, currentPickNumbe
     for (const pack of packs) {
       for (const card of pack.cards ?? []) {
         if (!cardColorsOf(card).includes(color)) continue;
-        if (pack.pickNumber >= 5 && typicalPick(card) != null && (cardZ(card, setMetrics) ?? -9) >= -0.5) evaluable++;
+        if (pack.pickNumber >= 5 && typicalPick(card, setMetrics) != null && (cardZ(card, setMetrics) ?? -9) >= -0.5) evaluable++;
         const l = lateness(card, pack.pickNumber, setMetrics);
-        if (l >= 2) lateCards.push({ name: card.name ?? `#${card.grpId}`, pick: pack.pickNumber + 1, ata: typicalPick(card), l });
+        if (l >= 2) lateCards.push({ name: card.name ?? `#${card.grpId}`, pick: pack.pickNumber + 1, ata: typicalPick(card, setMetrics), l });
       }
     }
     lateCards.sort((a, b) => b.l - a.l);
@@ -787,12 +856,15 @@ function scoreCard(card, ctx) {
  * the table. Uses the per-card wheel rate measured in 17Lands' draft data
  * when available; otherwise a curve on ALSA fitted to Sierkovitz's numbers
  * (ALSA ≈ 4 → ~15%, 5 → ~30%, 6 → ~50% for an early-pick wheel).
+ * In Quick Draft (`bots` given) the measured rates — Premier humans — don't
+ * apply; the curve runs on the bots' last-seen positions instead.
  */
-function wheelInfo(card, pos, packCardCount, table = null) {
+function wheelInfo(card, pos, packCardCount, table = null, bots = null) {
   const returnPick = pos.pickNumber + POD_SIZE;            // 0-based pick it would come back at
   if (packCardCount <= POD_SIZE) return null;               // this pack won't come back
-  const measured = table ? setDataLookups.wheelProb(table, card.grpId, pos.pickNumber) : null;
-  const alsa = card?.stats?.alsa;
+  const botAlsa = bots?.byCard?.get(card?.grpId)?.alsa ?? null;
+  const measured = table && !bots ? setDataLookups.wheelProb(table, card.grpId, pos.pickNumber) : null;
+  const alsa = botAlsa ?? card?.stats?.alsa;
   let prob = measured;
   if (prob == null) {
     if (alsa == null) return null;
@@ -929,7 +1001,7 @@ function computeRecommendation(packCards, ctx, tier3) {
   if (table) {
     ctx.modelScores = setDataLookups.modelScores(table, poolIds, packIds);
     ctx.modelMax = ctx.modelScores ? Math.max(...ctx.modelScores.values()) : 0;
-    ctx.win = ctx.modelScores ? setDataLookups.winScores(table, poolIds, packIds, ctx.pos.overall, { tau: WIN_RULE.tau }) : null;
+    ctx.win = ctx.modelScores ? setDataLookups.winScores(table, poolIds, packIds, ctx.pos.overall, { tau: WIN_RULE.tau, pickShift: pairPickShift(ctx.setMetrics?.bots) }) : null;
   }
   const win = ctx.win ?? null;
 
@@ -937,7 +1009,7 @@ function computeRecommendation(packCards, ctx, tier3) {
     .map(card => {
       const { total, parts, phase } = scoreCard(card, ctx);
       const syn = synergyByGrpId.get(card.grpId);
-      const wheel = wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table);
+      const wheel = wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table, ctx.setMetrics?.bots);
       if (win) {
         // Win-value rule: lift in the projected deck's win chance, tilted
         // toward what top players take (see WIN_RULE).
@@ -1043,6 +1115,16 @@ const WIN_RULE = {
   wheelMargin: 0.008,   // ≈ 0.2 points: worth trying to wheel the top pick
 };
 
+/**
+ * Quick Draft: per pair, how many picks later its cards stay available than
+ * in Premier (the bots' color bias), for the win model's expected future
+ * picks. Null outside Quick Draft.
+ */
+function pairPickShift(bots) {
+  if (!bots?.colorShift) return null;
+  return PAIRS.map((p) => Math.max(-2, Math.min(2, ((bots.colorShift[p[0]] ?? 0) + (bots.colorShift[p[1]] ?? 0)) / 2)));
+}
+
 const fmtWin = (pp) => `${pp >= 0 ? '+' : '−'}${Math.abs(pp).toFixed(1)}%`;
 
 function topPairOf(win) {
@@ -1108,6 +1190,40 @@ const PLAYABLES_TARGET = 23;        // spells in a 40-card deck
 const PLAYABLE_MIN_Z = -1.0;        // about D+: a card you'd actually put in the deck
 
 /** How many of your picks would make a deck in your current colors. */
+/** Start of pack 2: which colors the left side (who now passes to you) is in. */
+function pack2Insight(left) {
+  if (!left || left.cards < 4) return null;
+  const total = COLORS.reduce((a, c) => a + left.byColor[c], 0);
+  const heavy = COLORS.filter((c) => left.byColor[c] >= 0.25 * total).sort((a, b) => left.byColor[b] - left.byColor[a]);
+  if (!heavy.length) return null;
+  return {
+    tone: 'cut', color: heavy[0],
+    short: `Pack 2 comes from your left — they took mostly ${heavy.map((c) => COLOR_NAME[c]).join(' and ')} from your pack-1 packs`,
+    detail: `Cards missing when your pack-1 packs came back (${left.wheels} packs, ${left.cards} cards) went to the players on your left, who pass to you in pack 2. Expect less of those colors; already counted in the color signals.`,
+    strength: 0,
+  };
+}
+
+/** Quick Draft: which colors the bots leave for you, from their standing bias. */
+const BOT_BIAS_MIN = 0.15; // picks
+function botBiasInsight(bots) {
+  const shift = bots?.colorShift;
+  if (!shift) return null;
+  const open = COLORS.filter((c) => shift[c] >= BOT_BIAS_MIN).sort((a, b) => shift[b] - shift[a]);
+  const taken = COLORS.filter((c) => shift[c] <= -BOT_BIAS_MIN).sort((a, b) => shift[a] - shift[b]);
+  if (!open.length && !taken.length) return null;
+  const fmt = (c) => `${COLOR_NAME[c]} ${shift[c] > 0 ? '+' : '−'}${Math.abs(shift[c]).toFixed(1)}`;
+  const parts = [];
+  if (open.length) parts.push(`bots under-draft ${open.map(fmt).join(', ')}`);
+  if (taken.length) parts.push(`take ${taken.map(fmt).join(', ')} early`);
+  return {
+    tone: 'bots', color: open[0] ?? null,
+    short: `Quick Draft: ${parts.join('; ')} (picks vs Premier)`,
+    detail: 'From 17Lands Quick Draft data: how many picks later (+) or earlier (−) cards of each color are last seen than in Premier Draft. A color the bots under-draft keeps flowing in every pod; the win-value picks already account for it.',
+    strength: 0,
+  };
+}
+
 function computePlayables(pickHistory, commit, setMetrics) {
   const colors = commit.top;
   let playables = 0, creatures = 0, twoDrops = 0;
@@ -1182,7 +1298,7 @@ function analyze(trackerState, packCards, position, settings) {
   const pos = draftPosition(p.packNumber ?? lastPack?.packNumber ?? 0, p.pickNumber ?? 0, packSize);
   const picksMade = pickHistory.length;
 
-  const colorSignals = computeColorSignals(packHistory, setMetrics, confidenceThreshold, pos.packNumber);
+  const colorSignals = computeColorSignals(packHistory, setMetrics, confidenceThreshold, pos.packNumber, pickHistory);
   const hasColorData = Object.values(colorSignals).some(s => s.hasData);
 
   const composition = computeDeckComposition(pickHistory);
@@ -1195,6 +1311,13 @@ function analyze(trackerState, packCards, position, settings) {
   const signalInsights = computeSignalInsights(trackerState, pos.packNumber, pos.pickNumber, commit.top, colorSignals);
   const pivot = computePivot(pickHistory, commit, setMetrics, picksMade, pos.packSize);
   if (pivot) signalInsights.unshift(pivot);
+  if (pos.packNumber === 1 && pos.pickNumber < 6) {
+    const pack2 = pack2Insight(leftSideTakes(packHistory, pickHistory, setMetrics));
+    if (pack2) signalInsights.unshift(pack2);
+  }
+  const bots = botBiasInsight(setMetrics?.bots);
+  // Most useful while choosing colors: first in pack 1, then at the end.
+  if (bots) (pos.packNumber === 0 && picksMade < 8 ? signalInsights.unshift(bots) : signalInsights.push(bots));
 
   // ── Tier 3 detectors ────────────────────────────────────────────────────────
   const synergyResult      = synergyDetector.analyzeSynergies(pickHistory, packCards ?? []);
@@ -1281,6 +1404,7 @@ module.exports = {
   computeSignalInsights, computeDeckGrade,
   analyze, emptyState, detectColors, scoreCard,
   // exported for tests
+  computeBotProfile, pairPickShift,
   cardQuality, wheelInfo, colorCommitment, lateness, normCdf, pipsOf, WIN_RULE,
   setWeights, getWeights, setTuning,
 };

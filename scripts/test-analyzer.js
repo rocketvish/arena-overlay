@@ -308,5 +308,54 @@ test('analyzer ranks by the win rule when the set table has a value block', () =
   assert.match(a.recommendation.picks[0].reason, /deck win rate/);
 });
 
+console.log('\nPack 2 forecast');
+
+test("what the left side took in pack 1 counts against that color in pack 2", () => {
+  const mk = (id, color) => ({ grpId: id, name: `C${id}`, color, stats: null });
+  // Pack-1 pick-1 pack: lots of black; when it wheels, the black is gone.
+  const first = [mk(1, 'W'), mk(2, 'B'), mk(3, 'B'), mk(4, 'B'), mk(5, 'B'), mk(6, 'U'), mk(7, 'U'), mk(8, 'G'), mk(9, 'R'), mk(10, 'W'), mk(11, 'G'), mk(12, 'R')];
+  const back = [mk(6, 'U'), mk(7, 'U'), mk(8, 'G')];
+  const pack2 = [{ packNumber: 1, pickNumber: 1, cards: [mk(20, 'W'), mk(21, 'U')] }];
+  const history = [{ packNumber: 0, pickNumber: 0, cards: first }, { packNumber: 0, pickNumber: 8, cards: back }, ...pack2];
+  const picks = [{ ...mk(1, 'W'), packNumber: 0, pickNumber: 0 }];
+  const withLeft = sa.computeColorSignals(history, metrics, 1, 1, picks);
+  const without = sa.computeColorSignals(history, metrics, 1, 1, null);
+  assert.ok(withLeft.B.score < without.B.score, `B ${withLeft.B.score} vs ${without.B.score}`);
+  assert.match(withLeft.B.evidence, /left side took/);
+});
+
+console.log('\nQuick Draft bots');
+
+test('bot profile: per-color shift in last-seen pick vs Premier', () => {
+  const cards = [];
+  for (let i = 0; i < 10; i++) {
+    cards.push({ mtgaId: 500 + i, color: 'U', stats: { alsa: 5 } });
+    cards.push({ mtgaId: 600 + i, color: 'G', stats: { alsa: 5 } });
+  }
+  const quick = { cards: Object.fromEntries(cards.map((c) => [c.mtgaId, { ata: 4, alsa: c.color === 'U' ? 6 : 4.5, picks: 500 }])) };
+  const bots = sa.computeBotProfile(cards, quick);
+  assert.strictEqual(bots.colorShift.U, 1);
+  assert.strictEqual(bots.colorShift.G, -0.5);
+  assert.strictEqual(bots.colorShift.W, 0, 'too few cards → no claim');
+  const shift = sa.pairPickShift(bots);
+  assert.strictEqual(shift[wv.PAIRS.indexOf('UG')], 0.25);
+  // Wheel odds follow the bots' last-seen position, not Premier wheel rates.
+  const w = sa.wheelInfo({ grpId: 500, stats: { alsa: 2 } }, { pickNumber: 0, packSize: 14 }, 14, table, bots);
+  assert.strictEqual(w.measured, false);
+  assert.strictEqual(w.alsa, 6);
+});
+
+test('win model: a pair the bots under-draft projects a better deck', () => {
+  const t = winTable();
+  const plain = setData.winScores(t, [101], [102], 1, { tau: 0.05 });
+  const shift = wv.PAIRS.map((p) => (p === 'WU' ? 2 : 0));
+  // Make later phantom picks worse so shifting toward earlier picks matters.
+  for (const ph of t.valueTable.phantom) ph.value.forEach((_, i) => { ph.value[i] = -0.002 * (i % 14); });
+  const flat = setData.winScores(t, [101], [102], 1, { tau: 0.05 });
+  const biased = setData.winScores(t, [101], [102], 1, { tau: 0.05, pickShift: shift });
+  assert.ok(plain && flat && biased);
+  assert.ok(biased.pairProbs.WU > flat.pairProbs.WU, `${biased.pairProbs.WU} vs ${flat.pairProbs.WU}`);
+});
+
 console.log(failures ? `\n${failures} test(s) failed\n` : '\nAll analyzer tests passed\n');
 process.exit(failures ? 1 : 0);

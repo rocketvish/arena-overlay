@@ -119,17 +119,30 @@ function shapeValue(vt, counts) {
 }
 
 /** Deck slots for pair p: castable pool cards, then expected future picks. */
-function deckUnits(vt, pool, p, nextPick) {
+function deckUnits(vt, pool, p, nextPick, shift = 0) {
   const bit = 1 << p;
   const units = [];
   for (const c of pool) if (c.mask & bit) units.push({ w: c.w, a: c.a });
   const ph = vt.phantom[p];
+  const packSize = vt.picks / 3;
   let mass = 0, k = 0;
   for (let t = Math.max(0, nextPick); t < vt.picks; t++) {
-    mass += ph.castable[t] > 0 ? ph.castable[t] : 0;
+    // shift > 0: cards of this pair stay around longer than in the data the
+    // phantoms come from (Quick Draft bots under-drafting its colors), so
+    // pick t looks like pick t − shift there. Stays inside the same pack.
+    let value = ph.value[t], castable = ph.castable[t], at = t;
+    if (shift) {
+      const start = Math.floor(t / packSize) * packSize;
+      const src = Math.max(start, Math.min(start + packSize - 1, t - shift));
+      const lo = Math.floor(src), hi = Math.min(lo + 1, start + packSize - 1), f = src - lo;
+      value = ph.value[lo] * (1 - f) + ph.value[hi] * f;
+      castable = ph.castable[lo] * (1 - f) + ph.castable[hi] * f;
+      at = Math.round(src);
+    }
+    mass += castable > 0 ? castable : 0;
     while (mass >= 1) {
       mass -= 1;
-      units.push({ w: ph.value[t] + SPREAD[k++ % SPREAD.length] * ph.sd[t], a: ph.unitTraits[t] });
+      units.push({ w: value + SPREAD[k++ % SPREAD.length] * ph.sd[at], a: ph.unitTraits[at] });
     }
   }
   return units;
@@ -201,9 +214,9 @@ function poolCards(vt, poolIds) {
 }
 
 /** Projected decks per pair, from `nextPick` on. */
-function projectDecks(vt, poolIds, nextPick) {
+function projectDecks(vt, poolIds, nextPick, pickShift = null) {
   const pool = poolCards(vt, poolIds);
-  return PAIRS.map((_, p) => buildDeck(vt, deckUnits(vt, pool, p, nextPick)));
+  return PAIRS.map((_, p) => buildDeck(vt, deckUnits(vt, pool, p, nextPick, pickShift?.[p] ?? 0)));
 }
 
 /** Projected deck value for each pair (archetype effect included). */
@@ -224,10 +237,11 @@ function softMax(values, tau) {
  * whole draft (pack * packSize + pick). Returns null without a value table,
  * else { scores: Map(grpId → Δ log-odds), shape: Map(grpId → part of Δ from
  * deck shape in your likeliest pair), pairProbs: {WU: p, …}, best, needs }.
+ * `pickShift` (per pair, in picks): see deckUnits — Quick Draft bot bias.
  */
-function scorePack(vt, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU } = {}) {
+function scorePack(vt, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU, pickShift = null } = {}) {
   if (!vt) return null;
-  const decks = projectDecks(vt, poolIds, pickIndex + 1);
+  const decks = projectDecks(vt, poolIds, pickIndex + 1, pickShift);
   const base = Float64Array.from(decks, (d, p) => d.value + vt.pairBias[p]);
   const baseSoft = softMax(base, tau);
   let top = 0;

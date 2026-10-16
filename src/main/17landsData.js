@@ -637,6 +637,64 @@ async function fetchColorRatings(setCode, { force = false } = {}) {
   return p;
 }
 
+// ─── Quick Draft pick positions (how the bots draft) ─────────────────────────
+
+const QUICK_MIN_PICKS = 100;   // per-card picks before its Quick Draft positions are trusted
+
+/**
+ * Average pick (ATA) and last-seen (ALSA) positions from Quick Draft, where
+ * the other seven drafters are Arena's bots — so they describe what the bots
+ * take and pass. 17Lands publishes no Quick Draft datasets, and its live
+ * endpoint only covers sets in the current window: null otherwise.
+ * Returns { fetchedAt, cards: { [mtgaId]: { ata, alsa, picks } } }.
+ */
+async function fetchQuickDraftStats(setCode, { force = false } = {}) {
+  const key = `${setCode}_quickdraft_stats`;
+  if (!force) {
+    const mem = memCache.get(key);
+    if (isFresh(mem)) return mem.stats;
+    const disk = readCacheEntry(key);
+    if (isFresh(disk)) {
+      memCache.set(key, disk);
+      return disk.stats;
+    }
+  }
+  if (inflight.has(key)) return inflight.get(key);
+
+  const p = (async () => {
+    const previous = readCacheEntry(key);
+    try {
+      const raw = await requestJSON(`https://www.17lands.com/card_ratings/data?expansion=${encodeURIComponent(setCode)}&format=QuickDraft`);
+      const cards = {};
+      let picks = 0;
+      for (const c of Array.isArray(raw) ? raw : []) {
+        const id = Number(c?.mtga_id);
+        const n = Number(c?.pick_count) || 0;
+        if (!Number.isSafeInteger(id) || n < QUICK_MIN_PICKS) continue;
+        const ata = Number.isFinite(c.avg_pick) ? c.avg_pick : null;
+        const alsa = Number.isFinite(c.avg_seen) ? c.avg_seen : null;
+        if (ata == null && alsa == null) continue;
+        cards[id] = { ata, alsa, picks: n };
+        picks += n;
+      }
+      // Same guard as the card data: a set leaving the live window returns a trickle.
+      if (picks === 0 || (previous && Date.now() - previous.fetchedAt < RECENT_SNAPSHOT_MS && picks < previous.stats.picks * THIN_RESPONSE_RATIO)) {
+        return previous?.stats ?? null;
+      }
+      const stats = { fetchedAt: Date.now(), cards, picks };
+      const entry = { fetchedAt: stats.fetchedAt, stats };
+      writeCacheEntry(key, entry);
+      memCache.set(key, entry);
+      return stats;
+    } catch (e) {
+      console.error('[17lands] Quick Draft stats fetch failed:', e.message);
+      return previous?.stats ?? null;
+    }
+  })().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
 // ─── Scryfall lookup for cards 17Lands doesn't list (e.g. basic lands) ───────
 
 const SCRYFALL_CACHE_FILE = 'scryfall-arena-ids.json';
@@ -766,7 +824,7 @@ function sendStatus(win, payload) {
 }
 
 module.exports = {
-  fetchSetData, fetchColorRatings, clearCache, resolveArenaIds, getScryfallCardData,
+  fetchSetData, fetchColorRatings, fetchQuickDraftStats, clearCache, resolveArenaIds, getScryfallCardData,
   inferSetFromGrpIds, setStatusSink,
   // exported for tests
   computeGrades, buildCardData, attachCardText,
