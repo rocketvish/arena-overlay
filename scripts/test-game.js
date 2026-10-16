@@ -123,6 +123,36 @@ test('opponent read: instant-speed cards in their colors that fit open mana, mos
   assert.strictEqual(o.threats[0].kind, 'trick');
 });
 
+test('opponent odds: revealed cards pick the archetype; hand odds follow deck share and hand size', () => {
+  const cards = new Map([
+    [1, { mtgaId: 1, name: 'Shock', color: 'R', cmc: 1, typeLine: 'Instant', oracleText: 'Shock deals 2 damage to any target.' }],
+    [2, { mtgaId: 2, name: 'Giant Growth', color: 'G', cmc: 1, typeLine: 'Instant', oracleText: 'Target creature gets +3/+3 until end of turn.' }],
+    [3, { mtgaId: 3, name: 'Counterspell', color: 'U', cmc: 2, typeLine: 'Instant', oracleText: 'Counter target spell.' }],
+    [4, { mtgaId: 4, name: 'Gruul Beast', color: 'RG', cmc: 3, typeLine: 'Creature', oracleText: '' }],
+  ]);
+  const pairs = Object.fromEntries(['WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG'].map((p) => [p, { games: 1000 }]));
+  const table = {
+    pairs,
+    cards: {
+      1: { deck: { RG: [0.5, 1.2], UR: [0.6, 1.5], BR: [0.6, 1.5], WR: [0.6, 1.5] } },
+      2: { deck: { RG: [0.4, 1.0], UG: [0.3, 1.0], BG: [0.3, 1.0], WG: [0.3, 1.0] } },
+      3: { deck: { UR: [0.5, 1.0], UB: [0.5, 1.0], WU: [0.5, 1.0], UG: [0.5, 1.0] } },
+      4: { deck: { RG: [0.9, 1.5] } },
+    },
+  };
+  const snap = (handCount) => ({ opp: { landColors: [], seen: [4], seenCounts: { 4: 1 }, untappedLands: 2, handCount, libraryCount: 30 } });
+  const o = ga.opponentThreats(snap(5), cards, table);
+  assert.strictEqual(o.mode, 'odds');
+  assert.strictEqual(o.archetype[0].pair, 'RG', 'a Gruul card points at RG');
+  assert.deepStrictEqual(o.threats.map((t) => t.name).slice(0, 2), ['Shock', 'Giant Growth']);
+  assert.ok(o.threats.every((t) => t.name !== 'Counterspell' || t.pHand < 0.02), 'blue card unlikely in RG');
+  assert.ok(o.holding.removal > 0 && o.holding.removal < 1);
+  const bigger = ga.opponentThreats(snap(7), cards, table);
+  assert.ok(bigger.threats[0].pHand > o.threats[0].pHand, 'more cards in hand → more likely to hold it');
+  // Without per-archetype stats it falls back to the colors-only list.
+  assert.notStrictEqual(ga.opponentThreats(snap(5), cards, { cards: { 1: { pairs: { RG: [0.5, 100] } } } }).mode, 'odds');
+});
+
 test('draw odds ignore cards that were never in the deck', () => {
   const cards = new Map([[10, { typeLine: 'Basic Land — Forest' }], [11, { typeLine: 'Creature — Elf' }]]);
   const snap = { deckCards: [10, 10, 11, 11], me: { known: [10, 99], libraryCount: 3 } };

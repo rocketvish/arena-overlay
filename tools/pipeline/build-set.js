@@ -123,7 +123,9 @@ async function gamePass(file, nCards, cardIndexOf, isLand = () => false) {
   const mull = newMulliganStats();
   const z = () => new Float64Array(nCards);
   const agg = { gihW: z(), gihN: z(), ohW: z(), ohN: z(), gpW: z(), gpN: z(), gnsW: z(), gnsN: z() };
-  const pairs = {}; // pair → { w: Float64Array, n: Float64Array }
+  // pair → { w, n: drawn-game wins / games; has: games whose deck runs the
+  // card; copies: summed copies } (Float64Array per card)
+  const pairs = {};
   const decks = {}; // pair → { n, w, topN, topW } two-color deck results
   let cols = null, games = 0;
 
@@ -160,7 +162,7 @@ async function gamePass(file, nCards, cardIndexOf, isLand = () => false) {
     const pair = pairKey(row[cols.main]);
     let pp = null;
     if (pair) {
-      pp = pairs[pair] ?? (pairs[pair] = { w: z(), n: z() });
+      pp = pairs[pair] ?? (pairs[pair] = { w: z(), n: z(), has: z(), copies: z() });
       const dk = decks[pair] ?? (decks[pair] = { n: 0, w: 0, topN: 0, topW: 0 });
       dk.n++; dk.w += won;
       if (Number(row[cols.wr]) >= TOP_WR_BUCKET && Number(row[cols.ng]) >= TOP_MIN_GAMES_BUCKET) { dk.topN++; dk.topW += won; }
@@ -168,6 +170,7 @@ async function gamePass(file, nCards, cardIndexOf, isLand = () => false) {
     for (let c = 0; c < nCards; c++) {
       const di = cols.deck[c];
       if (di === undefined || row[di] === '0' || row[di] === '') continue;
+      if (pp) { pp.has[c]++; pp.copies[c] += Number(row[di]) || 0; }
       const inOh = row[cols.oh[c]] !== '0';
       const drawn = row[cols.drawn[c]] !== '0';
       agg.gpN[c]++; agg.gpW[c] += won;
@@ -507,6 +510,13 @@ async function main() {
       gns: rate(g.agg.gnsW[c], g.agg.gnsN[c]),
       ata: agg.ataN[c] > 0 ? Math.round((agg.ataSum[c] / agg.ataN[c]) * 100) / 100 : null,
       pairs, wheel,
+      // How decks of each pair run the card: [share of decks with ≥ 1, mean
+      // copies in those decks] — for reading an opponent's likely hand.
+      deck: Object.fromEntries(Object.entries(g.pairs).flatMap(([pair, pp]) => {
+        const games = g.decks[pair]?.n ?? 0;
+        if (games < 200 || pp.has[c] / games < 0.002) return [];
+        return [[pair, [r4(pp.has[c] / games), Math.round((pp.copies[c] / pp.has[c]) * 100) / 100]]];
+      })),
     };
     modelOrder.push([meta.mtgaId, c]);
   }

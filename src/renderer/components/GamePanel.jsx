@@ -1,7 +1,8 @@
 import React from 'react';
 
-// In-game information: mulligan data, the opponent's likely instant-speed
-// cards, and draw odds. Information only — it never tells you which play to make.
+// In-game information: mulligan data, the opponent's likely archetype and
+// instant-speed cards (with odds they hold them), and draw odds. Information
+// only — it never tells you which play to make.
 
 const COLOR_HEX = { W: '#f5e664', U: '#50a0ff', B: '#b090e0', R: '#f06464', G: '#50b95a' };
 const KIND = {
@@ -41,7 +42,12 @@ function Mulligan({ m }) {
   );
 }
 
+const pct0 = (v) => `${Math.round(v * 100)}%`;
+const Pair = ({ pair }) => <>{pair.split('').map((c) => <span key={c} style={{ color: COLOR_HEX[c], fontWeight: 800 }}>{c}</span>)}</>;
+
 function Opponent({ o }) {
+  // With per-archetype deck data: archetype odds and hand odds.
+  if (o.mode === 'odds') return <OpponentOdds o={o} />;
   return (
     <>
       <div style={{ fontSize: 12, color: '#ccc', marginBottom: 4 }}>
@@ -64,6 +70,55 @@ function Opponent({ o }) {
             );
           })}
         </div>
+      )}
+    </>
+  );
+}
+
+function OpponentOdds({ o }) {
+  const kinds = ['removal', 'trick', 'counter'].filter((k) => o.holding?.[k] != null);
+  return (
+    <>
+      <div style={{ fontSize: 12, color: '#ccc', marginBottom: 4 }}
+           title={`From the ${o.evidence} card${o.evidence === 1 ? '' : 's'} they've shown and their lands, weighed against which cards 17Lands decks of each color pair run.`}>
+        {o.archetype.length
+          ? o.archetype.map((a, i) => <span key={a.pair}>{i ? ' · ' : ''}<Pair pair={a.pair} /> {pct0(a.p)}</span>)
+          : 'Archetype unknown'}
+        {' · '}<b>{o.open}</b> open · {o.handCount} in hand
+      </div>
+      {o.open === 0 ? (
+        <div style={{ fontSize: 11, color: '#777' }}>Tapped out — no instant-speed cards possible</div>
+      ) : (
+        <>
+          {kinds.length > 0 && (
+            <div style={{ display: 'flex', gap: 10, fontSize: 11, marginBottom: 4 }}
+                 title="Chance they hold at least one card of this kind they can cast with their open mana. Assumes their hand is a random draw of the cards they haven't shown — they hold tricks on purpose, so treat these as floors.">
+              {kinds.map((k) => (
+                <span key={k} style={{ color: KIND[k].color }}>
+                  {KIND[k].label} <b>{pct0(o.holding[k])}</b>
+                </span>
+              ))}
+            </div>
+          )}
+          {o.threats.length === 0 ? (
+            <div style={{ fontSize: 11, color: '#777' }}>Nothing likely at this mana</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {o.threats.map((t) => {
+                const k = KIND[t.kind] ?? KIND.other;
+                return (
+                  <div key={t.grpId} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}
+                       title={`In their hand now: ~${pct0(t.pHand)}. In their deck: ${t.seen ? 'yes (seen)' : `~${pct0(t.pDeck)}`}.`}>
+                    <span style={{ fontSize: 9, color: k.color, minWidth: 46, textTransform: 'uppercase', fontWeight: 700 }}>{k.label}</span>
+                    <span style={{ color: '#eee', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}{t.seen ? ' ·seen' : ''}</span>
+                    <span style={{ color: '#888', fontFamily: 'monospace', fontSize: 11 }}>{t.cmc}</span>
+                    <span style={{ color: '#ddd', fontFamily: 'monospace', fontSize: 11, minWidth: 30, textAlign: 'right' }}>{pct0(t.pHand)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
     </>
   );
@@ -120,7 +175,7 @@ export default function GamePanel({ game }) {
       {game.playDraw && <Section title="You choose" right="17Lands data"><PlayDraw p={game.playDraw} /></Section>}
       {game.mulligan && <Section title="Mulligan" right="17Lands data"><Mulligan m={game.mulligan} /></Section>}
       {!game.mulligan && game.race && game.turn > 0 && <Section title="Race (unblocked)"><Race r={game.race} /></Section>}
-      {!game.mulligan && game.opponent && <Section title="Opponent could have" right="17Lands decks in their colors"><Opponent o={game.opponent} /></Section>}
+      {!game.mulligan && game.opponent && <Section title="Opponent" right="17Lands deck lists"><Opponent o={game.opponent} /></Section>}
       {!game.mulligan && game.draws && <Section title="Your library"><Draws d={game.draws} /></Section>}
       {!game.setCode && (
         <div style={{ padding: '6px 10px', fontSize: 10, color: '#666' }}>Card details unavailable for this deck (works for Limited decks of a known set).</div>

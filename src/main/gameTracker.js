@@ -245,6 +245,7 @@ function snapshot() {
       untappedLands: oppLands.filter((o) => !o.tapped).length,
       landColors: [...new Set(oppLands.flatMap((o) => o.colors))],
       seen: [...game.oppSeen.keys()],
+      seenCounts: Object.fromEntries(game.oppSeen), // grpId → copies revealed
     },
   };
 }

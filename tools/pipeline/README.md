@@ -53,6 +53,20 @@ the left side. `pack2-research.js` checks whether that predicts what reaches you
 it does (HOB / SOS / ECL), about 1.4× as much per unit as the ordinary pack-1 signal, which
 the overlay now adds to its pack-2 color signals (`LEFT_TAKE_WEIGHT` in `signalAnalyzer.js`).
 
+## Opponent read (in game)
+
+Per card, the table stores how each two-color archetype runs it (`cards[id].deck[P]` =
+[share of decks, mean copies]). `src/main/opponentRead.js` infers the opponent's archetype from
+every card they've revealed plus their lands, then the odds they hold each instant-speed card
+(random hand drawn from what they haven't shown — a floor, since players hold tricks).
+`opp-research.js` treats held-out 17Lands decks as the opponent: on HOB the archetype is right
+92% after one spell + lands and 96–98% after 3–5 (colors alone: 82–89%), and "does the deck run
+this instant" is nearly as well calibrated as knowing the archetype outright.
+
+```sh
+node --max-old-space-size=12000 tools/pipeline/opp-research.js HOB
+```
+
 ## Quick Draft
 
 17Lands publishes no Quick Draft datasets, so tables are Premier-only. In a Quick Draft the

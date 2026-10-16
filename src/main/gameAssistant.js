@@ -3,8 +3,9 @@
  *
  * Deliberately *information*, not "make this play" advice:
  *   - mulligan: keep-vs-mulligan win rates from 17Lands' public game data
- *   - opponent read: instant-speed cards their colors can cast with the mana
- *     they have open, ranked by how often 17Lands decks in that pair run them
+ *   - opponent read: their likely archetype from every card they've shown,
+ *     and the odds they're holding each instant-speed card they could cast
+ *     with the mana they have open (opponentRead.js; 17Lands deck lists)
  *   - draw odds: what's left in your library
  *
  * Inputs: a gameTracker snapshot, a card lookup (grpId → normalized 17Lands
@@ -13,6 +14,8 @@
  */
 
 'use strict';
+
+const opponentRead = require('./opponentRead');
 
 const COLORS = 'WUBRG';
 const REMOVAL_RE = /\b(destroy target|exile target|deals? \d+ damage to (any target|target)|deals damage equal to .* to (any target|target)|gets? [-−]\d+\/[-−]\d+|fights? (another )?target|return target (creature|nonland permanent) to its owner's hand)/i;
@@ -125,6 +128,50 @@ function category(card) {
   return 'other';
 }
 
+const isInstantSpeed = (card) => /\bInstant\b/.test(card.typeLine ?? '') || /\bFlash\b/.test(card.oracleText ?? '');
+const hasDeckStats = (table) => !!table?.pairs && Object.values(table.cards ?? {}).some((c) => c?.deck && Object.keys(c.deck).length);
+
+/**
+ * With per-archetype deck stats in the set table: the opponent's likely
+ * archetype, and for every instant-speed card castable with their open mana
+ * the odds it's in their hand now — plus the odds they hold at least one
+ * removal spell / trick / counter. Checked on held-out 17Lands decks
+ * (tools/pipeline/opp-research.js).
+ */
+function opponentOdds(snapshot, cardsById, table, { limit = 6 } = {}) {
+  const o = snapshot.opp;
+  const colors = opponentColors(snapshot, cardsById);
+  const open = o.untappedLands;
+  const seenCounts = o.seenCounts ?? Object.fromEntries((o.seen ?? []).map((g) => [g, 1]));
+  const odds = opponentRead.archetypeOdds(table, seenCounts, o.landColors ?? []);
+  const archetype = Object.entries(odds.probs)
+    .filter(([, p]) => p >= 0.05).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([pair, p]) => ({ pair, p: Math.round(p * 100) / 100 }));
+  const hand = o.handCount ?? 0;
+  const hidden = hand + (o.libraryCount ?? 0);
+  const threats = [];
+  if (open > 0) {
+    for (const card of cardsById.values()) {
+      if (!isInstantSpeed(card) || card.cmc == null || card.cmc > open) continue;
+      const r = opponentRead.cardOdds(table, odds, card.mtgaId, { seen: seenCounts[card.mtgaId] ?? 0, hand, hidden });
+      if (r.inHand < 0.01) continue;
+      threats.push({ grpId: card.mtgaId, name: card.name, cmc: card.cmc, kind: category(card), pHand: r.inHand, pDeck: r.inDeck, seen: (seenCounts[card.mtgaId] ?? 0) > 0 });
+    }
+  }
+  threats.sort((a, b) => b.pHand - a.pHand);
+  const holding = {};
+  for (const kind of ['removal', 'trick', 'counter']) {
+    const ps = threats.filter((t) => t.kind === kind).map((t) => t.pHand);
+    if (ps.length) holding[kind] = opponentRead.anyOf(ps);
+  }
+  if (threats.length) holding.any = opponentRead.anyOf(threats.map((t) => t.pHand));
+  const total = threats.reduce((s, t) => s + t.pHand, 0) || 1;
+  return {
+    colors, open, archetype, holding, evidence: odds.evidence, mode: 'odds',
+    threats: threats.slice(0, limit).map((t) => ({ ...t, share: t.pHand / total })),
+  };
+}
+
 /**
  * Instant-speed cards (instants and flash) the opponent could cast right now:
  * castable in the colors they've shown, mana value ≤ their untapped lands.
@@ -132,6 +179,7 @@ function category(card) {
  * so the list reflects what people really have, not every card that exists.
  */
 function opponentThreats(snapshot, cardsById, table, { limit = 6 } = {}) {
+  if (hasDeckStats(table)) return opponentOdds(snapshot, cardsById, table, { limit });
   const colors = opponentColors(snapshot, cardsById);
   const open = snapshot.opp.untappedLands;
   if (!colors.length || open === 0) return { colors, open, threats: [] };
@@ -240,4 +288,4 @@ function analyzeGame(snapshot, cardsById, table) {
   };
 }
 
-module.exports = { analyzeGame, mulliganAdvice, playDrawAdvice, raceMath, opponentThreats, drawOdds, opponentColors, PRIOR };
+module.exports = { analyzeGame, mulliganAdvice, playDrawAdvice, raceMath, opponentThreats, opponentOdds, drawOdds, opponentColors, PRIOR };
