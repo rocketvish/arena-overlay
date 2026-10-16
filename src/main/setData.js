@@ -18,6 +18,7 @@ const { app } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const winValue = require('./winValue');
 
 const REMOTE_BASE = 'https://github.com/rocketvish/arena-overlay/releases/download/set-data';
 const TABLE_SCHEMA = 1;
@@ -100,7 +101,18 @@ function prepare(raw, fetchedAt) {
   const modelIndex = new Map();
   if (m) m.ids.forEach((id, i) => modelIndex.set(id, i));
   const cards = raw.cards && typeof raw.cards === 'object' && !Array.isArray(raw.cards) ? raw.cards : {};
-  return { ...raw, cards, model: m, fetchedAt, modelIndex };
+  let valueTable = null;
+  try { valueTable = winValue.prepareValue({ ...raw, cards }); } catch { valueTable = null; }
+  return { ...raw, cards, model: m, fetchedAt, modelIndex, valueTable };
+}
+
+/**
+ * Win-value scores for a pack (see winValue.js): how much each card raises
+ * your projected deck's win chance. Null when the table has no value block.
+ */
+function winScores(table, poolIds, packIds, pickIndex, opts) {
+  if (!table?.valueTable) return null;
+  return winValue.scorePack(table.valueTable, poolIds, packIds, pickIndex, opts);
 }
 
 /**
@@ -235,6 +247,6 @@ function toRawRatings(table) {
 }
 
 module.exports = {
-  loadSetTable, getSetTable, pairGih, wheelProb, modelScores, toRawRatings,
+  loadSetTable, getSetTable, pairGih, wheelProb, modelScores, winScores, toRawRatings, prepare,
   PAIR_PRIOR_GAMES,
 };

@@ -36,12 +36,13 @@ const SET_NAMES = {
   TLA: 'Avatar: The Last Airbender', TMT: 'Teenage Mutant Ninja Turtles',
 };
 
-// Click to lock/unlock — works even when the hotkey is taken by another app.
+// Click to pin/unpin — works even when the hotkey is taken by another app.
+// isInteractable = not pinned (the overlay's top bar and corner take the mouse).
 function OverlayLockChip({ isInteractable, hotkey }) {
   const color = isInteractable ? '#5cc8ff' : '#7a7a7a';
   const bg = isInteractable ? 'rgba(92,200,255,0.18)' : 'rgba(255,255,255,0.04)';
   const border = isInteractable ? 'rgba(92,200,255,0.55)' : 'rgba(255,255,255,0.12)';
-  const label = isInteractable ? 'OVERLAY: UNLOCKED — click to lock' : 'OVERLAY: LOCKED — click to unlock';
+  const label = isInteractable ? 'OVERLAY: CLICK-THROUGH EXCEPT TOP BAR — click to pin' : 'OVERLAY: PINNED (fully click-through) — click to unpin';
   const hotkeyNote = !hotkey?.key ? ''
     : hotkey.ok ? ` (or press ${hotkey.key})`
     : `. The ${hotkey.key} hotkey could not be registered — another app is using it; change it in Settings.`;
@@ -49,8 +50,8 @@ function OverlayLockChip({ isInteractable, hotkey }) {
     <button
       onClick={() => window.electronAPI?.setOverlayLocked?.(isInteractable)}
       title={(isInteractable
-        ? 'Overlay can be dragged and resized. Click to lock it (click-through, fixed in place)'
-        : 'Overlay is click-through and fixed in place. Click to unlock it for moving/resizing') + hotkeyNote}
+        ? 'Only the overlay’s top bar and bottom-right corner take the mouse (move / resize); everything else lets clicks through to Arena. Click to pin it (clicks pass through everywhere)'
+        : 'Clicks pass through the whole overlay to Arena. Click to unpin it (top bar and corner become movable / resizable again)') + hotkeyNote}
       style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
       padding: '2px 8px', borderRadius: 4,

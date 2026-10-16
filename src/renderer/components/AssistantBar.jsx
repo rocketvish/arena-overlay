@@ -179,7 +179,7 @@ export default function AssistantBar({ assistantState, settings, inDraft }) {
   return (
     <div style={{ flexShrink: 0 }}>
       {/* ─── Section divider + header bar ─── */}
-      <div style={{
+      <div data-hit style={{
         display: 'flex', alignItems: 'center',
         padding: '4px 10px',
         background: 'rgba(60,90,150,0.22)',

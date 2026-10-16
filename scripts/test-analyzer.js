@@ -239,5 +239,74 @@ test('playables count cards you would play in your colors', () => {
   assert.strictEqual(a.playables.playables, 5);                // Card 0 (F) isn't playable
 });
 
+console.log('\nDeck win value');
+const wv = require('../src/main/winValue');
+
+// Synthetic set: W/U creatures and spells, an R bomb, a dual land. Future
+// picks in WU are average non-creatures, so creatures run short unless drafted.
+function winTable() {
+  const cards = {
+    101: { name: 'W Bear', color: 'W', types: ['Creature'] },
+    102: { name: 'W Spell', color: 'W', types: ['Instant'] },
+    103: { name: 'U Bear', color: 'U', types: ['Creature'] },
+    104: { name: 'U Spell', color: 'U', types: ['Sorcery'] },
+    105: { name: 'R Bomb', color: 'R', types: ['Creature'] },
+    106: { name: 'Dual Land', color: '', types: ['Land'] },
+  };
+  const ids = [101, 102, 103, 104, 105, 106];
+  const picks = 42;
+  const phantom = Object.fromEntries(wv.PAIRS.map((p) => [p, {
+    value: Array(picks).fill(0.0), castable: Array(picks).fill(0.6), sd: Array(picks).fill(0),
+    traits: [Array(picks).fill(0), Array(picks).fill(0), Array(picks).fill(0), Array(picks).fill(0)],
+  }]));
+  return setData.prepare({
+    cards,
+    model: { dim: 1, ids, b: [0, 0, 0, 0, 0, 0], u: [0, 0, 0, 0, 0, 0], v: [0, 0, 0, 0, 0, 0] },
+    value: {
+      ids, w: [0.02, 0.03, 0.02, 0.03, 0.2, 0.05], traits: [1, 0, 1, 0, 1, 0],
+      pairBias: Array(10).fill(0), filler: -0.05, toPct: 25, phantom,
+      // Each creature short of 15 costs 0.03 log-odds.
+      structure: { creatures: { short: [[15, -0.03]], over: [] } },
+    },
+  }, 0);
+}
+
+test('value block is loaded with the set table, and rejected when malformed', () => {
+  assert.ok(winTable().valueTable, 'prepared');
+  assert.strictEqual(setData.prepare({ cards: {}, value: { ids: [1], w: ['x'] } }, 0).valueTable, null);
+  assert.strictEqual(setData.prepare({ cards: {}, value: { ids: [1], w: [0.1], pairBias: [0], phantom: {} } }, 0).valueTable, null);
+});
+
+test('late in a creature-light deck, a creature beats a slightly better spell', () => {
+  const t = winTable();
+  const pool = [102, 104, 102, 104, 102, 104, 102, 104, 102, 104, 102, 104, 102, 104, 102, 104, 102, 104, 102, 104]; // 20 WU spells
+  const r = setData.winScores(t, pool, [101, 102], 38, { tau: 0.05 });
+  assert.ok(r.scores.get(101) > r.scores.get(102), `creature ${r.scores.get(101)} vs spell ${r.scores.get(102)}`);
+  assert.ok(r.shape.get(101) > 0, 'the creature gains through deck shape');
+  assert.ok(r.needs.creatures.gain > 0, 'deck reports a creature need');
+});
+
+test('lands never take a spell slot; off-color cards fade once committed', () => {
+  const t = winTable();
+  const early = setData.winScores(t, [], [105, 106], 0, { tau: 0.05 });
+  assert.strictEqual(early.scores.get(106), 0, 'dual land adds no spell value');
+  assert.ok(early.scores.get(105) > 0, 'the bomb counts while colors are open');
+  const pool = Array(16).fill(0).map((_, i) => (i % 2 ? 101 : 104)); // 8 W creatures, 8 U spells
+  const late = setData.winScores(t, pool, [105, 101], 30, { tau: 0.05 });
+  assert.ok(late.scores.get(101) > late.scores.get(105), 'in-color creature beats the off-color bomb late');
+  assert.strictEqual(late.topPair, 'WU');
+});
+
+test('analyzer ranks by the win rule when the set table has a value block', () => {
+  const t = winTable();
+  const metricsWin = { ...metrics, table: t };
+  const mk = (id) => ({ grpId: id, name: t.cards[id].name, color: t.cards[id].color, typeLine: t.cards[id].types.join(' '), stats: null });
+  const pool = Array(20).fill(0).map((_, i) => ({ ...mk(i % 2 ? 102 : 104), packNumber: 1, pickNumber: i % 14 }));
+  const a = sa.analyze({ packHistory: [], pickHistory: pool, setMetrics: metricsWin, packSize: 14 }, [mk(101), mk(102)], { packNumber: 2, pickNumber: 10, packSize: 14 }, {});
+  assert.strictEqual(a.recommendation.primary.grpId, 101);
+  assert.ok(a.recommendation.win.byCard[101] > a.recommendation.win.byCard[102]);
+  assert.match(a.recommendation.picks[0].reason, /deck win rate/);
+});
+
 console.log(failures ? `\n${failures} test(s) failed\n` : '\nAll analyzer tests passed\n');
 process.exit(failures ? 1 : 0);

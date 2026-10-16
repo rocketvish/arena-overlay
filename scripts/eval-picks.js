@@ -37,7 +37,7 @@ function parseArgs(argv) {
 /** Cards + metrics exactly as the app would build them from the set table. */
 async function loadContext(set, tablePath) {
   const raw = JSON.parse(fs.readFileSync(tablePath, 'utf-8'));
-  const table = { ...raw, modelIndex: new Map(raw.model.ids.map((id, i) => [id, i])) };
+  const table = setData.prepare(raw, 0); // same preparation as the app (pick model + win model)
   const cards = landsData.buildCardData(setData.toRawRatings(table));
   const { log } = console;
   console.log = () => {};

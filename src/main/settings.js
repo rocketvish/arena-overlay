@@ -50,6 +50,7 @@ const DEFAULT_SETTINGS = {
     gameAssistant: true,
   },
   columns: {
+    win: true,
     grade: true,
     gihwr: true,
     ohwr: true,

@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setOverlayLocked: (locked) => ipcRenderer.invoke('overlay:set-locked', locked),
   getOverlayLocked: () => ipcRenderer.invoke('overlay:get-locked'),
   resizeOverlay: (width, height) => ipcRenderer.send('overlay:resize', width, height),
+  moveOverlay: (x, y) => ipcRenderer.send('overlay:move', x, y),
+  setOverlayBusy: (busy) => ipcRenderer.send('overlay:busy', busy),
+  getOverlayHover: () => ipcRenderer.invoke('overlay:get-hover'),
+  setHitRegions: (regions) => ipcRenderer.send('overlay:hit-regions', regions),
   getHotkeyStatus: () => ipcRenderer.invoke('hotkeys:status'),
   toggleVisibility: () => ipcRenderer.send('overlay:toggle-visibility'),
   getOverlayVisible: () => ipcRenderer.invoke('overlay:get-visible'),
@@ -96,6 +100,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const h = (_e, v) => cb(v);
     ipcRenderer.on('interactable-changed', h);
     return () => ipcRenderer.removeListener('interactable-changed', h);
+  },
+  onOverlayHover: (cb) => {
+    const h = (_e, v) => cb(v);
+    ipcRenderer.on('overlay-hover', h);
+    return () => ipcRenderer.removeListener('overlay-hover', h);
   },
   onDraftStarted: (cb) => {
     const h = (_e, d) => cb(d);

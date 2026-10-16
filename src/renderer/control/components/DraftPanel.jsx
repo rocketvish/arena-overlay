@@ -383,7 +383,9 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
   // Recommendation comes from the assistant pipeline (signalAnalyzer) — not draftState.
   const recommendation = assistantState?.recommendation ?? draftState.recommendation ?? null;
   const signalInsights = assistantState?.signalInsights ?? [];
-  const columns  = settings?.columns  ?? {};
+  const winByCard = recommendation?.win?.byCard ?? null;
+  const columns  = { ...(settings?.columns ?? {}), win: settings?.columns?.win !== false && !!winByCard };
+  const winBestValue = winByCard ? Math.max(...Object.values(winByCard)) : null;
   const display  = settings?.display  ?? {};
   const sortBy      = display.sortBy      ?? 'grade';
   const colorFilter = display.colorFilter ?? 'all';
@@ -495,6 +497,8 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
               compact={compact}
               isTopPick={i === 0}
               isRecommended={recommendedGrpId != null && card.grpId === recommendedGrpId}
+              winPct={winByCard?.[card.grpId] ?? null}
+              winBest={winByCard?.[card.grpId] != null && winByCard[card.grpId] === winBestValue && winBestValue > 0}
             />
           ))
         )}

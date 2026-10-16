@@ -16,8 +16,10 @@
  *   wheel     P(card is still in the pack 8 picks later), by pick 1..6
  *   ata       average pick taken at
  * plus `model`: a small pick model trained on top players' drafts
- * (see trainPickModel), and an eval file of held-out drafts for
- * scripts/eval-picks.js (written to the cache dir, never shipped).
+ * (see trainPickModel); `value`: the deck win model that scores picks by
+ * how much they raise your deck's win rate (see winModel.js); and an eval
+ * file of held-out drafts for scripts/eval-picks.js (written to the cache
+ * dir, never shipped).
  */
 'use strict';
 
@@ -27,6 +29,8 @@ const path = require('path');
 const https = require('https');
 const zlib = require('zlib');
 const { readCsvGz, normCardName } = require('./csv');
+const { loadCardList } = require('./cards');
+const winModel = require('./winModel');
 
 const COLORS = 'WUBRG';
 const POD_SIZE = 8;
@@ -65,14 +69,6 @@ function request(url, { method = 'GET' } = {}) {
   });
 }
 
-async function fetchJSON(url) {
-  const res = await request(url);
-  const chunks = [];
-  for await (const c of res) chunks.push(c);
-  if (res.statusCode !== 200) throw new Error(`HTTP ${res.statusCode} for ${url}`);
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
 /** Download a dataset into the cache unless an identical copy is there. */
 async function ensureDataset(kind, set, format, cacheDir) {
   const url = `https://17lands-public.s3.amazonaws.com/analysis_data/${kind}/${kind}_public.${set}.${format}.csv.gz`;
@@ -95,24 +91,6 @@ async function ensureDataset(kind, set, format, cacheDir) {
   fs.renameSync(file + '.part', file);
   console.log('done');
   return { file, modified };
-}
-
-// ─── Card identity ────────────────────────────────────────────────────────────
-
-/**
- * Dataset columns are card names; the app keys by Arena grpId. 17Lands' card
- * list (legacy endpoint — still lists every card with its mtga_id even after
- * the stats window has passed) bridges the two.
- */
-async function loadCardList(set) {
-  const list = await fetchJSON(`https://www.17lands.com/card_ratings/data?expansion=${set}&format=PremierDraft`);
-  const byName = new Map();
-  list.forEach((c, order) => {
-    if (c.mtga_id == null) return;
-    const key = normCardName(c.name);
-    if (!byName.has(key)) byName.set(key, { mtgaId: c.mtga_id, name: c.name, color: c.color ?? '', rarity: c.rarity, types: c.types ?? [], order });
-  });
-  return byName;
 }
 
 function pairKey(colors) {
@@ -451,6 +429,16 @@ async function main() {
   const evalRes = modelTop1(model, nCards, d.evalDrafts);
   console.log(`  held-out top-1 agreement: model ${(100 * evalRes.top1).toFixed(1)}%  (card bias only: ${(100 * evalRes.baseTop1).toFixed(1)}%) over ${evalRes.picks} picks`);
 
+  // Deck win model. Optional: a set still ships without it if this fails.
+  let value = null;
+  try {
+    console.log('  deck win model…');
+    const colorById = new Map([...cardList.values()].map((m) => [m.mtgaId, m.color]));
+    ({ value } = await winModel.buildValueBlock({ set: args.set, gameFile: game.file, draftFile: draft.file, cache: args.cache, cardColor: (id) => colorById.get(id) }));
+  } catch (e) {
+    console.warn(`  deck win model skipped: ${e.message}`);
+  }
+
   // ── Assemble the shipped table ────────────────────────────────────────────
   const cards = {};
   const modelOrder = [];
@@ -509,6 +497,7 @@ async function main() {
       u: modelOrder.flatMap(([, c]) => Array.from(model.u.subarray(c * dim, c * dim + dim), r4)),
       v: modelOrder.flatMap(([, c]) => Array.from(model.v.subarray(c * dim, c * dim + dim), r4)),
     },
+    ...(value ? { value } : {}),
   };
   fs.mkdirSync(args.out, { recursive: true });
   const outFile = path.join(args.out, `${args.set}.json`);
@@ -528,4 +517,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });
 }
 
-module.exports = { trainPickModel, pairKey, hashId };
+module.exports = { trainPickModel, pairKey, hashId, loadCardList, ensureDataset };

@@ -861,15 +861,18 @@ function buildPickOptions(scored, ctx) {
     const p = ctx.modelScores?.get(card.grpId);
     return p != null ? `top 17Lands drafters take it here ~${Math.round(p * 100)}% of the time` : null;
   };
-  const safeReason = inColors
-    ? `best for your ${ctx.commit.top.join('')} deck (${gradeLabel(safe)})`
-    : `best overall pick (${gradeLabel(safe)})`;
+  const winPart = safeEntry.parts.win;
+  const safeReason = winPart != null
+    ? [`${fmtWin(winPart)} deck win rate (${gradeLabel(safe)})`, shapeNote(safe, ctx)].filter(Boolean).join(', ')
+    : inColors
+      ? `best for your ${ctx.commit.top.join('')} deck (${gradeLabel(safe)})`
+      : `best overall pick (${gradeLabel(safe)})`;
   const isClear = upside && upside.grpId === safe.grpId;
   picks.push({
     kind: isClear ? 'clear' : 'safe',
     card: safe,
     reason: topModel && topModel[0] === safe.grpId ? `${safeReason} · top players' pick` : safeReason,
-    reasonLong: [safeReason, modelNote(safe), communityNote(safe)].filter(Boolean).join(' · '),
+    reasonLong: [safeReason, winPart != null && 'deck win rate from 17Lands game results, controlling for player skill', modelNote(safe), communityNote(safe)].filter(Boolean).join(' · '),
   });
 
   const upsideQualifies = upside && !isClear && gradeAtOrAbove(upside.stats?.grade, 'B+');
@@ -904,7 +907,7 @@ function buildPickOptions(scored, ctx) {
   // doesn't, you may get both by taking the runner-up now.
   const runnerUp = scored[1];
   if (runnerUp && safeEntry.wheel?.likely && !(runnerUp.wheel?.prob >= 0.35) &&
-      safeEntry.total - runnerUp.total < 0.06) {
+      safeEntry.total - runnerUp.total < (ctx.wheelMargin ?? 0.06)) {
     const reason = `${safe.name} comes back ~${Math.round(safeEntry.wheel.prob * 100)}% of the time (at pick ${safeEntry.wheel.returnPick}${safeEntry.wheel.measured ? ', per 17Lands draft data' : ''}) — take ${runnerUp.card.name} now and you may get both`;
     picks.push({ kind: 'wheel', card: runnerUp.card, wheelCard: safe, reason, reasonLong: reason });
   }
@@ -921,26 +924,45 @@ function computeRecommendation(packCards, ctx, tier3) {
   for (const s of tier3?.synergies ?? []) synergyByGrpId.set(s.grpId, s);
 
   const table = ctx.setMetrics?.table;
+  const poolIds = ctx.pickedCards.map((c) => c.grpId);
+  const packIds = packCards.map((c) => c.grpId);
   if (table) {
-    ctx.modelScores = setDataLookups.modelScores(table, ctx.pickedCards.map((c) => c.grpId), packCards.map((c) => c.grpId));
+    ctx.modelScores = setDataLookups.modelScores(table, poolIds, packIds);
     ctx.modelMax = ctx.modelScores ? Math.max(...ctx.modelScores.values()) : 0;
+    ctx.win = ctx.modelScores ? setDataLookups.winScores(table, poolIds, packIds, ctx.pos.overall, { tau: WIN_RULE.tau }) : null;
   }
+  const win = ctx.win ?? null;
 
   const scored = packCards
     .map(card => {
       const { total, parts, phase } = scoreCard(card, ctx);
-      let score = total;
       const syn = synergyByGrpId.get(card.grpId);
+      const wheel = wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table);
+      if (win) {
+        // Win-value rule: lift in the projected deck's win chance, tilted
+        // toward what top players take (see WIN_RULE).
+        const delta = win.scores.get(card.grpId);
+        const p = ctx.modelScores.get(card.grpId);
+        parts.win = delta != null ? delta * win.toPct : null;
+        const score = delta != null && p != null
+          ? delta + WIN_RULE.lambda * Math.log(Math.max(p, 1e-6) / ctx.modelMax)
+          : -Infinity;
+        return { card, total: score, parts, phase, synergy: syn ?? null, wheel };
+      }
+      let score = total;
       if (syn?.score) score += syn.score * 0.04;
       // Win-condition support: small nudge toward cards that protect or find a bomb
       if (tier3?.winConditions?.hasBomb && tier3.winConditions.supportPattern?.test(card.oracleText ?? '')) score += 0.015;
-      return { card, total: score, parts, phase, synergy: syn ?? null, wheel: wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table) };
+      return { card, total: score, parts, phase, synergy: syn ?? null, wheel };
     })
     .sort((a, b) => b.total - a.total);
 
   const primary = scored[0]?.card ?? null;
   if (!primary) return null;
-  const secondary = scored.length > 1 && (scored[0].total - scored[1].total) < 0.03
+  // "Close call" margins in each rule's own units.
+  ctx.closeMargin = win ? WIN_RULE.closeMargin : 0.03;
+  ctx.wheelMargin = win ? WIN_RULE.wheelMargin : 0.06;
+  const secondary = scored.length > 1 && (scored[0].total - scored[1].total) < ctx.closeMargin
     ? scored[1].card : null;
 
   const picks = buildPickOptions(scored, ctx);
@@ -957,7 +979,15 @@ function computeRecommendation(packCards, ctx, tier3) {
   // Short explanation for the single-line rec bar.
   const phase = scored[0].phase;
   let explanation;
-  if (phase === 'early') {
+  if (win && scored[0].parts.win != null) {
+    const parts = [];
+    const pair = topPairOf(win);
+    if (pair) parts.push(`Building ${pair.pair}${pair.p < 0.6 ? ' (still open)' : ''}`);
+    parts.push(`${fmtWin(scored[0].parts.win)} to your deck's win rate`);
+    const note = shapeNote(primary, ctx);
+    if (note) parts.push(note);
+    explanation = parts.join(' — ');
+  } else if (phase === 'early') {
     explanation = 'Early pick — taking the strongest card';
   } else {
     const parts = [];
@@ -973,11 +1003,75 @@ function computeRecommendation(packCards, ctx, tier3) {
     primary, secondary, explanation, colors: ctx.commit.top, picks,
     // Per-card breakdown so the UI / tests can explain any ranking.
     ranking: scored.map(s => ({
-      grpId: s.card.grpId, name: s.card.name, score: Math.round(s.total * 1000) / 1000,
-      parts: Object.fromEntries(Object.entries(s.parts).map(([k, v]) => [k, Math.round(v * 100) / 100])),
+      grpId: s.card.grpId, name: s.card.name,
+      score: Number.isFinite(s.total) ? Math.round(s.total * 1000) / 1000 : null,
+      parts: Object.fromEntries(Object.entries(s.parts).map(([k, v]) => [k, v == null ? null : Math.round(v * 100) / 100])),
       wheelLikely: !!s.wheel?.likely,
     })),
+    // Win-value view (null before a set's deck win model exists): per-card
+    // lift in deck win rate (percentage points), the likeliest pair, and
+    // which deck-shape traits that deck is short on.
+    win: win ? {
+      byCard: Object.fromEntries(scored.filter((s) => s.parts.win != null).map((s) => [s.card.grpId, Math.round(s.parts.win * 100) / 100])),
+      pair: topPairOf(win),
+      needs: Object.fromEntries(Object.entries(win.needs).map(([k, v]) => [k, { count: v.count, gainPct: Math.round(v.gain * win.toPct * 100) / 100 }])),
+    } : null,
   };
+}
+
+// ─── Win-value rule ───────────────────────────────────────────────────────────
+
+/**
+ * Once a set's table has the deck win model (tools/pipeline/winModel.js),
+ * picks are ranked by
+ *
+ *   win value (how much the card lifts your projected deck's chance to win,
+ *   including what it does for creature count, two-drops, removal, top end)
+ *   + λ · ln(p / p_max) of the top-player pick model.
+ *
+ * Chosen with tools/pipeline/win-policy.js on held-out 17Lands drafts: pure
+ * win value overfits its own model's noise; this blend beat imitating top
+ * players both in simulated pods (decks scored by an independently fitted
+ * model) and in real drafts (drafters who took this rule's pick where it
+ * differed from the top-player model's won more, within skill bucket).
+ * τ: how sharply the projected deck commits to one color pair.
+ */
+const WIN_RULE = {
+  tau: 0.05,
+  lambda: 0.02,
+  closeMargin: 0.004,   // ≈ 0.1 win-rate points: show a runner-up
+  wheelMargin: 0.008,   // ≈ 0.2 points: worth trying to wheel the top pick
+};
+
+const fmtWin = (pp) => `${pp >= 0 ? '+' : '−'}${Math.abs(pp).toFixed(1)}%`;
+
+function topPairOf(win) {
+  const best = Object.entries(win.pairProbs ?? {}).sort((a, b) => b[1] - a[1])[0];
+  return best ? { pair: best[0], p: Math.round(best[1] * 100) / 100 } : null;
+}
+
+const SHAPE_LABEL = { creatures: 'creature', twoDrops: 'two-drop', removal: 'removal', topEnd: 'top end' };
+
+/** "fills a two-drop gap" when the card's value comes partly from deck shape. */
+function shapeNote(card, ctx) {
+  const win = ctx.win;
+  const gain = win?.shape?.get(card.grpId);
+  const total = win?.scores?.get(card.grpId);
+  if (!gain || gain <= 0 || !total || gain < 0.25 * total) return null;
+  const short = Object.entries(win.needs ?? {}).filter(([, v]) => v.gain > 0.002).map(([k]) => k);
+  const traits = cardShapeTraits(card);
+  const fills = short.filter((k) => traits.includes(k)).map((k) => SHAPE_LABEL[k]);
+  return fills.length ? `fills a ${fills.join(' / ')} gap` : 'improves your deck’s shape';
+}
+
+function cardShapeTraits(card) {
+  const tl = card.typeLine ?? '';
+  const out = [];
+  const creature = /\bCreature\b/i.test(tl);
+  if (creature) out.push('creatures');
+  if (creature && card.cmc != null && card.cmc <= 2) out.push('twoDrops');
+  if (REMOVAL_RE.test(card.oracleText ?? '')) out.push('removal');
+  return out;
 }
 
 // ─── Wheel report: what the table took from a pack you've seen before ────────
@@ -1187,6 +1281,6 @@ module.exports = {
   computeSignalInsights, computeDeckGrade,
   analyze, emptyState, detectColors, scoreCard,
   // exported for tests
-  cardQuality, wheelInfo, colorCommitment, lateness, normCdf, pipsOf,
+  cardQuality, wheelInfo, colorCommitment, lateness, normCdf, pipsOf, WIN_RULE,
   setWeights, getWeights, setTuning,
 };

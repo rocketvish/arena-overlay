@@ -120,13 +120,14 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
 
       {/* Overlay */}
       <Section title="Overlay">
-        <Slider label="Opacity" value={overlay.opacity ?? 0.85} min={0.1} max={1} step={0.05}
+        <Slider label="Background opacity" value={overlay.opacity ?? 0.85} min={0.1} max={1} step={0.05}
           onChange={(v) => onSet('overlay.opacity', v)} format={(v) => `${Math.round(v * 100)}%`} />
       </Section>
 
       {/* Stat columns */}
       <Section title="Stat columns">
         {[
+          ['win',   'Deck Win Value', "Points this card adds to your projected deck's win rate (from 17Lands game results; appears once a set's public data is out)"],
           ['grade', 'Grade', 'Letter grade (A+–F) based on σ from mean'],
           ['gihwr', 'GIH Win Rate', 'Win rate when card is in opening hand or drawn'],
           ['ohwr',  'Opening Hand Win Rate', 'Win rate when card is in opening hand'],
@@ -196,7 +197,7 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
         <TextInput label="Toggle visibility hotkey"
           value={general.hotkey_toggle}
           onChange={(v) => onSet('general.hotkey_toggle', v)} />
-        <TextInput label="Toggle interact hotkey"
+        <TextInput label="Pin / unpin hotkey"
           value={general.hotkey_interact}
           onChange={(v) => onSet('general.hotkey_interact', v)} />
         <Toggle label="Launch on system startup"

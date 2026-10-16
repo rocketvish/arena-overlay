@@ -53,10 +53,11 @@ function LockIcon({ open, color, size = 14 }) {
 }
 
 export default function OverlayHeader({
-  setCode, format, inDraft, packNumber, pickNumber, totalPicks, packSize = 14, interactHotkey,
-  isInteractable, isMinimized, onToggleMinimize, onToggleInteract,
+  setCode, format, inDraft, packNumber, pickNumber, totalPicks, packSize = 14,
+  isInteractable, hovered = false, onDragStart, isMinimized, onToggleMinimize,
   landsStatus, lastLogUpdate, packCardCount, packCardCountMismatch, idleLabel,
 }) {
+  // isInteractable = not pinned: the overlay takes the mouse while hovered.
   const setName = setCode ? (SET_NAMES[setCode] ?? setCode) : null;
   const formatShort = FORMAT_SHORT[format] ?? format ?? 'Premier';
   const ago = useAgo(lastLogUpdate);
@@ -73,16 +74,19 @@ export default function OverlayHeader({
     }
   }, [isInteractable]);
 
-  const lockColor = isInteractable ? '#5cc8ff' : '#888';
-  const hotkeyLabel = interactHotkey?.ok ? interactHotkey.key : null;
+  const lockColor = !isInteractable ? '#888' : hovered ? '#5cc8ff' : '#666';
 
   return (
-    <div style={{
+    <div
+      // A hot spot (takes the mouse) and the move handle (startWindowDrag in App.jsx).
+      data-hit
+      onPointerDown={isInteractable ? onDragStart : undefined}
+      style={{
       display: 'flex', flexDirection: 'column',
       background: 'rgba(0,0,0,0.55)',
       borderBottom: isMinimized ? 'none' : '1px solid rgba(255,255,255,0.07)',
       flexShrink: 0,
-      WebkitAppRegion: isInteractable ? 'drag' : 'no-drag',
+      cursor: isInteractable ? 'move' : 'default',
     }}>
       {/* Pulse keyframes — declared once at the top so styled inline animation works */}
       <style>{`
@@ -97,10 +101,11 @@ export default function OverlayHeader({
         {/* Lock state indicator (always visible, top-left corner) */}
         <div style={{
           flexShrink: 0,
-          WebkitAppRegion: 'no-drag',
           animation: pulsing ? 'lockPulse 0.5s ease-in-out 4' : 'none',
         }}
-        title={isInteractable ? 'Unlocked — drag to move, edges to resize' : 'Locked — click-through and fixed in place'}>
+        title={isInteractable
+          ? 'Drag this bar to move, the bottom-right corner to resize. Everything else lets clicks through to Arena'
+          : 'Pinned — clicks pass through to Arena everywhere'}>
           <LockIcon open={isInteractable} color={lockColor} size={14} />
         </div>
 
@@ -126,20 +131,17 @@ export default function OverlayHeader({
           </span>
         )}
 
-        {/* Controls (drag-exempt) */}
-        <div style={{ display: 'flex', gap: 3, WebkitAppRegion: 'no-drag', flexShrink: 0 }}>
-          {isInteractable && (
-            <>
-              <IconBtn onClick={onToggleInteract} title={`Lock overlay${hotkeyLabel ? ` (${hotkeyLabel})` : ''}`}>Lock</IconBtn>
-              <IconBtn onClick={onToggleMinimize} title={isMinimized ? 'Expand' : 'Collapse'}>
-                {isMinimized ? '▼' : '▲'}
-              </IconBtn>
-            </>
+        {/* Controls (buttons don't start a drag) */}
+        <div style={{ display: 'flex', gap: 3, flexShrink: 0 }}>
+          {isInteractable && hovered && (
+            <IconBtn onClick={onToggleMinimize} title={isMinimized ? 'Expand' : 'Collapse'}>
+              {isMinimized ? '▼' : '▲'}
+            </IconBtn>
           )}
           {!isInteractable && (
             <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)' }}
-                  title={hotkeyLabel ? `Press ${hotkeyLabel} to unlock` : 'Unlock from the tray icon or the control window'}>
-              {hotkeyLabel ?? 'locked'}
+                  title="Pinned (click-through everywhere). Unpin from the tray icon or the control window">
+              pinned
             </span>
           )}
         </div>

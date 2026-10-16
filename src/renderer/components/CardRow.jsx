@@ -95,6 +95,22 @@ function pct(v) { return v != null ? `${(v * 100).toFixed(1)}%` : null; }
 function estPct(v) { return v != null ? `~${(v * 100).toFixed(1)}` : null; }
 function ata(v) { return v != null ? v.toFixed(1) : null; }
 function iwd(v) { return v != null ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}` : null; }
+function winPts(v) { return v != null ? `${v >= 0.05 ? '+' : ''}${v.toFixed(1)}` : null; }
+
+// Deck win value: percentage points this card adds to your projected deck's
+// win rate. The pack's best is bright; near-zero (won't make the deck) is dim.
+function WinStat({ value, best }) {
+  const disp = value != null ? winPts(value) : '—';
+  const color = value == null ? '#666' : best ? '#7cff8c' : value >= 0.3 ? '#bfe8c6' : '#777';
+  return (
+    <span style={{
+      fontSize: 12, color, fontWeight: best ? 800 : 500,
+      minWidth: 40, textAlign: 'right', fontFamily: 'monospace', flexShrink: 0,
+    }}>
+      {disp}
+    </span>
+  );
+}
 
 function cardTooltip(card) {
   const s = card.stats;
@@ -117,7 +133,7 @@ function cardTooltip(card) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function CardRow({ card, columns, compact, isTopPick, isRecommended }) {
+export default function CardRow({ card, columns, compact, isTopPick, isRecommended, winPct = null, winBest = false }) {
   const { name, color, rarity, stats, hasLandsData } = card;
   const grade = stats?.grade ?? null;
   const estimated = !!stats?.gradeEstimated;
@@ -175,6 +191,8 @@ export default function CardRow({ card, columns, compact, isTopPick, isRecommend
 
       {/* Rarity dot */}
       <div style={{ width: 6, height: 6, borderRadius: '50%', background: rarityColor, flexShrink: 0 }} />
+
+      {columns.win && <WinStat value={winPct} best={winBest} />}
 
       {/* Stats — GIHWR is the primary scanning column, render bold/white */}
       {/* GIH% — 17Lands' measured value, or a dimmed "~" estimate when it's withheld */}

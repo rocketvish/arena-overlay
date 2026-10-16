@@ -92,7 +92,7 @@ function updateMenu(overlayWindow, controlWindow) {
       },
     },
     {
-      label: overlayLocked ? 'Unlock Overlay (move / resize)' : 'Lock Overlay (click-through)',
+      label: overlayLocked ? 'Unpin Overlay (movable by its top bar)' : 'Pin Overlay (fully click-through)',
       click: () => actions.toggleLock?.(),
     },
     { type: 'separator' },

@@ -9,6 +9,34 @@ Per set (~100–200 KB JSON):
 - per-card wheel rates by pick (is it still there 8 picks later?)
 - two-color deck win rates, all players and top players
 - a pick model trained on top players' drafts (pool-aware factorization, ~33 floats per card)
+- a deck win model (`value`, see below)
+
+## Deck win model
+
+`winModel.js` fits a logistic regression of game wins on deck contents, controlling for the
+player's skill bucket, rank and play/draw: a value per card, the archetype (pair) effect, and
+learned costs for deck shape — creatures short of 11/13/15, two-drops short of 2/4, removal
+short of 4, too many 6+ drops. Card traits come from Scryfall (`cards.js`). It also stores
+"phantom" future picks per pair (what drafters who ended in that pair took at each pick).
+The overlay (`src/main/winValue.js`) scores a pick by how much it raises the projected deck's
+win chance, blended with the top-player pick model (`WIN_RULE` in `signalAnalyzer.js`).
+
+Checked with `win-policy.js` on held-out drafts (games and drafts held out by draft id):
+
+- card values beat the 17Lands-style deck average at predicting held-out games
+- where the rule and the top-player model disagree, drafters who took the rule's pick won more
+  matches within their skill bucket: HOB +0.31pp per pick (t 5.4), SOS +0.04 (t 1.0),
+  ECL +0.35 (t 7.8; never tuned on), about 5 such picks per draft
+- in simulated pods, decks scored by a model fitted on the *other* half of the data:
+  +1.1 (HOB) / +2.9 (SOS) / +4.2 (ECL) points of deck value, with higher average GIH WR
+
+Pure win value (no blend) loses to imitation once the judge is independent — it chases its
+own noise — so keep λ > 0. Observational evidence, not a controlled experiment.
+
+```sh
+node --max-old-space-size=8192 tools/pipeline/win-research.js HOB          # held-out game prediction
+node --max-old-space-size=12000 tools/pipeline/win-policy.js HOB --taus 0.05 --lambdas 0.01,0.02
+```
 
 Public data appears ~2 weeks (drafts) / ~3 weeks (games) into a set. Until then the
 overlay runs on live 17Lands numbers and its model-free weights.

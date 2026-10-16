@@ -1,39 +1,47 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import CardRow from './CardRow';
 import AssistantBar from './AssistantBar';
 
 // ── Arena visual sort ─────────────────────────────────────────────────────────
-// Arena displays pack cards sorted by: rarity (mythic→rare→uncommon→common),
-// then by collector number ascending within each rarity tier.
-//
-// The collectorNumber field on each enriched card is the card's 0-based index
-// in the 17Lands data array, which empirically matches collector number − 1.
-// Cards not in 17Lands (basic lands, very new cards) have no collectorNumber
-// and sort to the end of the list.
-//
-// Verified against a TMT pack where Shredder's Armor (uncommon, coll#75)
-// appeared before all commons; and within commons, cards followed collector
-// number order (W#9 → U#53 → R#111 → G#118 → G#129 → WB#147 → ...).
+// The log lists a pack in booster order (commons first), not the order Arena
+// shows it. Arena's card database carries its own sort keys
+// (Order_MythicToCommon, Order_LandLast, Order_ColorOrder, Order_CMCWithXLast,
+// Order_Title); the pack is shown by rarity, then color — W, U, B, R, G, then
+// two-color pairs in guild order — with lands last. Collector number is NOT
+// the key: sets with a bonus sheet (FRA's cards numbered 197+) put those
+// cards among their own color, not after the main set.
 const RARITY_ORDER = { mythic: 0, rare: 1, uncommon: 2, common: 3 };
+const MONO_ORDER = { W: 0, U: 1, B: 2, R: 3, G: 4 };
+// Order_ColorOrder for two-color cards (Arena DB: WU 5, UR 8, BR 9, WG 13).
+const PAIR_ORDER = { WU: 5, WB: 6, UB: 7, UR: 8, BR: 9, BG: 10, RG: 11, WR: 12, WG: 13, UG: 14 };
+
+function colorOrder(card) {
+  const cs = (card.color ?? '').replace(/[^WUBRG]/g, '');
+  if (cs.length === 1) return MONO_ORDER[cs];
+  if (cs.length === 2) return PAIR_ORDER[['W', 'U', 'B', 'R', 'G'].filter((c) => cs.includes(c)).join('')] ?? 15;
+  if (cs.length > 2) return 15;
+  return 16; // colorless
+}
+
+const BASIC_NAMES = new Set(['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']);
+const isBasic = (card) => BASIC_NAMES.has(card.name);
+const isLand = (card) => isBasic(card) || (/\bLand\b/.test(card.typeLine ?? '') && !/\bCreature\b/.test(card.typeLine ?? ''));
+// Arena sorts X spells after everything else of their color.
+const cmcKey = (card) => (card.cmc ?? 99) + (/\{X\}/.test(card.manaCost ?? '') ? 100 : 0);
 
 function arenaVisualSort(cards) {
-  return cards.map((c, i) => ({ card: c, i })).sort((a, b) => {
-    const ca = a.card, cb = b.card;
-
-    // Cards with no 17Lands data have no collectorNumber — sort them last, preserving log order
-    const hasA = ca.collectorNumber != null;
-    const hasB = cb.collectorNumber != null;
-    if (!hasA && !hasB) return a.i - b.i;
-    if (!hasA) return 1;
-    if (!hasB) return -1;
-
-    // Primary: rarity (mythic/rare before uncommon before common)
-    const rA = RARITY_ORDER[ca.rarity] ?? 3;
-    const rB = RARITY_ORDER[cb.rarity] ?? 3;
-    if (rA !== rB) return rA - rB;
-
-    // Secondary: collector number ascending
-    return ca.collectorNumber - cb.collectorNumber;
+  const key = (c) => [
+    c.name ? 0 : 1,                     // unknown cards (no data) last, in log order
+    isBasic(c) ? 4 : RARITY_ORDER[c.rarity] ?? 3, // basics after commons
+    isLand(c) ? 1 : 0,
+    isLand(c) ? 1 : 0,
+    colorOrder(c),
+    cmcKey(c),
+  ];
+  return cards.map((c, i) => ({ card: c, i, k: key(c) })).sort((a, b) => {
+    for (let j = 0; j < a.k.length; j++) if (a.k[j] !== b.k[j]) return a.k[j] - b.k[j];
+    const byName = (a.card.name ?? '').localeCompare(b.card.name ?? '');
+    return byName || a.i - b.i;
   }).map(({ card }) => card);
 }
 
@@ -67,6 +75,7 @@ function ColHeaders({ columns, compact }) {
       {columns.grade && <span style={{ ...s, minWidth: 32, textAlign: 'center' }}>Grade</span>}
       <span style={{ flex: 1, fontSize: 10, color: '#888', fontWeight: 600, textTransform: 'uppercase' }}>Card</span>
       <div style={{ width: 6, flexShrink: 0 }} />
+      {columns.win && <span style={{ ...s, color: '#7ec8a0' }} title="Deck win value: percentage points this card adds to your projected deck's win rate (deck model fit on 17Lands game results, controlling for player skill; counts creatures, two-drops, removal and curve)">Win</span>}
       {columns.gihwr && <span style={s}>GIH%</span>}
       {columns.ohwr  && <span style={{ ...s, color: '#666' }}>OH%</span>}
       {columns.gpwr  && <span style={s}>GP%</span>}
@@ -120,6 +129,7 @@ function DataCredit({ setCode, fetchedAt }) {
   const url = `https://www.17lands.com/card_data?expansion=${encodeURIComponent(setCode ?? '')}&format=PremierDraft`;
   return (
     <span
+      data-hit
       onClick={() => window.electronAPI?.openUrl(url)}
       title={`Card stats from 17Lands (Premier Draft), downloaded ${fetchedAt ? new Date(fetchedAt).toLocaleString() : '—'}. Click to open 17lands.com`}
       style={{ fontSize: 9, color: '#7a8a9a', cursor: 'pointer', marginLeft: 8, whiteSpace: 'nowrap' }}>
@@ -173,12 +183,19 @@ function IdleView() {
   );
 }
 
+// Height of a full-size card row (8px padding top and bottom + text + border).
+const FULL_ROW_PX = 38;
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function DraftOverlay({ draftState, settings, recommendation, assistantState }) {
   if (!settings) return null;
 
-  const { columns = {}, display = {} } = settings;
+  const { display = {} } = settings;
   const compact = display.compactMode ?? false;
+  // Deck win value per card, once the set's deck win model is available.
+  const winByCard = assistantState?.recommendation?.win?.byCard ?? null;
+  const columns = { ...(settings.columns ?? {}), win: settings.columns?.win !== false && !!winByCard };
+  const winBestValue = winByCard ? Math.max(...Object.values(winByCard)) : null;
 
   const { inDraft, enrichedPack, pickedCards, landsStatus, landsError, packId,
           packEventId, pickNumber, packNumber, packSize, setCode,
@@ -219,6 +236,20 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
     return sorted;
   }, [enrichedPack, packEventId, expectedCount, overflow, rawCards]);
 
+  // The card list is click-through (so it never blocks Arena) and therefore
+  // can't be scrolled: switch to compact rows when the full pack wouldn't fit.
+  const listRef = useRef(null);
+  const [listHeight, setListHeight] = useState(0);
+  const hasList = inDraft && cards.length > 0;
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return undefined;
+    const ro = new ResizeObserver(([entry]) => setListHeight(entry.contentRect.height));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasList]);
+  const rowCompact = compact || (listHeight > 0 && cards.length * FULL_ROW_PX > listHeight);
+
   if (!inDraft) return <IdleView />;
 
   return (
@@ -236,9 +267,9 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
           fetchedAt={landsFetchedAt}
         />
       )}
-      {cards.length > 0 && <ColHeaders columns={columns} compact={compact} />}
+      {cards.length > 0 && <ColHeaders columns={columns} compact={rowCompact} />}
 
-      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+      <div ref={listRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
         {cards.length === 0 ? (
           <div style={{ padding: '20px 12px', fontSize: 11, color: '#444', textAlign: 'center' }}>
             Waiting for pack…
@@ -251,9 +282,11 @@ export default function DraftOverlay({ draftState, settings, recommendation, ass
               key={`${packEventId ?? packId ?? 0}-${i}-${card.grpId}`}
               card={card}
               columns={columns}
-              compact={compact}
+              compact={rowCompact}
               isTopPick={false}
               isRecommended={false}
+              winPct={winByCard?.[card.grpId] ?? null}
+              winBest={winByCard?.[card.grpId] != null && winByCard[card.grpId] === winBestValue && winBestValue > 0}
             />
           ))
         )}

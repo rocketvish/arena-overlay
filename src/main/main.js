@@ -28,7 +28,18 @@ if (!gotSingleInstanceLock) {
 }
 
 let overlayWindow = null;
-let isInteractable = false;
+// Mouse handling. The overlay never takes keyboard focus and is click-through
+// except over its "hot spots" (top bar, resize corner, a few buttons — the
+// renderer reports their rectangles). Everything else, the card list
+// included, lets clicks through to Arena; while the cursor is over that part
+// the overlay fades so you can see what's underneath. Pinned (legacy hotkey):
+// click-through everywhere.
+let overlayPinned = false;
+let overlayHover = 'none';  // 'none' | 'body' (over the overlay, click-through) | 'hit' (over a hot spot)
+let overlayBusy = false;    // a drag or resize is in progress: keep the mouse even if the cursor slips outside
+let hitRegions = [];        // [{ x, y, w, h }] in window coordinates (DIP)
+let hoverTimer = null;
+const HOVER_POLL_MS = 50;
 const hotkeyStatus = { toggle: null, interact: null }; // { key, ok } per hotkey
 
 const DRAFT_FORMATS = new Set(['PremierDraft', 'QuickDraft', 'TradDraft', 'Sealed']);
@@ -37,6 +48,7 @@ const COLOR_PAIRS = new Set(['W', 'U', 'B', 'R', 'G', 'WU', 'WB', 'WR', 'WG', 'U
 const SETTING_VALIDATORS = {
   'overlay.opacity': (v) => typeof v === 'number' && v >= 0.1 && v <= 1,
   'overlay.visible': (v) => typeof v === 'boolean',
+  'columns.win': (v) => typeof v === 'boolean',
   'columns.grade': (v) => typeof v === 'boolean',
   'columns.gihwr': (v) => typeof v === 'boolean',
   'columns.ohwr': (v) => typeof v === 'boolean',
@@ -180,10 +192,12 @@ function createOverlayWindow() {
 
   overlayWindow = new BrowserWindow({
     ...initialOverlayBounds(overlay),
-    opacity: overlay.opacity,
+    // No window opacity: the opacity setting only fades the background
+    // (renderer), so text stays crisp.
     frame: false,
     transparent: true,
-    // Start locked: click-through, can't take focus, can't be moved/resized.
+    // Never takes focus, so Arena keeps the keyboard. Moved and resized by
+    // the renderer's own handles (transparent windows can't be edge-resized).
     resizable: false,
     movable: false,
     focusable: false,
@@ -198,7 +212,9 @@ function createOverlayWindow() {
 
   hardenWindow(overlayWindow);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-  setOverlayLocked(true);
+  overlayWindow.setIgnoreMouseEvents(true);
+  setOverlayPinned(overlay.locked === true);
+  startHoverWatch();
 
   if (isDev) {
     overlayWindow.loadURL(DEV_ORIGIN);
@@ -218,52 +234,75 @@ function createOverlayWindow() {
 
   overlayWindow.on('moved', saveWindowBounds);
   overlayWindow.on('resized', saveWindowBounds);
-  overlayWindow.on('closed', () => { overlayWindow = null; });
+  overlayWindow.on('closed', () => { overlayWindow = null; stopHoverWatch(); });
 
   return overlayWindow;
 }
 
 /**
- * Locked (the default): the overlay ignores the mouse entirely — clicks and
- * drags go straight to Arena — it can't take keyboard focus, and it can't be
- * moved or resized. Unlocked: a normal draggable/resizable window.
- *
- * No `{ forward: true }` on setIgnoreMouseEvents: on Windows that installs a
- * global low-level mouse hook just to deliver hover events we never use, and
- * such hooks are a known source of cursor lag in games.
+ * Hover tracking by polling the cursor position (cheap). Not
+ * `setIgnoreMouseEvents(true, { forward: true })`: on Windows that installs a
+ * global low-level mouse hook, a known source of cursor lag in games.
  */
-function setOverlayLocked(locked) {
+function updateHover() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-
-  overlayWindow.setIgnoreMouseEvents(locked);
-  overlayWindow.setFocusable(!locked);
-  overlayWindow.setMovable(!locked);
-  // Not toggling `resizable`: transparent windows can't be edge-resized on
-  // Windows anyway (the renderer has its own resize grip, see
-  // overlay:resize), and toggling it made the window grow 1px per lock/unlock.
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-
-  if (locked) {
-    // Hand keyboard focus back to whatever is underneath (Arena).
-    if (overlayWindow.isFocused()) overlayWindow.blur();
-  } else {
-    // Unlocking a hidden overlay would look like nothing happened.
-    if (!overlayWindow.isVisible()) {
-      showOverlay();
-      broadcastToAll('overlay-visibility-changed', true);
+  let state = 'none';
+  if (overlayWindow.isVisible()) {
+    if (overlayBusy && !overlayPinned) state = 'hit';
+    else {
+      const pt = screen.getCursorScreenPoint();
+      const b = overlayWindow.getBounds();
+      const x = pt.x - b.x, y = pt.y - b.y;
+      if (x >= 0 && x < b.width && y >= 0 && y < b.height) {
+        const onHotSpot = !overlayPinned && hitRegions.some((r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
+        state = onHotSpot ? 'hit' : 'body';
+      }
     }
-    overlayWindow.focus();
   }
-
-  isInteractable = !locked;
-  // Broadcast to all windows so the control window status bar updates too
-  sendToWindows('interactable-changed', isInteractable);
-  tray.setLocked?.(locked);
+  if (state === overlayHover) return;
+  const hadMouse = overlayHover === 'hit';
+  overlayHover = state;
+  if (hadMouse !== (state === 'hit')) overlayWindow.setIgnoreMouseEvents(state !== 'hit');
+  sendToWindows('overlay-hover', state);
 }
 
-function toggleOverlayLock() {
-  setOverlayLocked(isInteractable);
+function startHoverWatch() {
+  if (!hoverTimer) hoverTimer = setInterval(updateHover, HOVER_POLL_MS);
 }
+
+function stopHoverWatch() {
+  clearInterval(hoverTimer);
+  hoverTimer = null;
+}
+
+/**
+ * Pinned: click-through even when hovered. Unpinned: takes the mouse while
+ * the cursor is over it. Either way it never takes keyboard focus.
+ */
+function setOverlayPinned(pinned) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  overlayPinned = pinned;
+  if (pinned) overlayBusy = false;
+  if (settings.get().overlay.locked !== pinned) settings.set('overlay.locked', pinned);
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  // Unpinning a hidden overlay would look like nothing happened.
+  if (!pinned && !overlayWindow.isVisible()) {
+    showOverlay();
+    broadcastToAll('overlay-visibility-changed', true);
+  }
+  updateHover();
+  // `interactable` = "takes the mouse on hover" (the control window's chip
+  // and the overlay's header read it).
+  sendToWindows('interactable-changed', !pinned);
+  tray.setLocked?.(pinned);
+}
+
+function toggleOverlayPin() {
+  setOverlayPinned(!overlayPinned);
+}
+
+/** The overlay accepts drag / resize requests only while it has the mouse. */
+const overlayHasMouse = () => !overlayPinned && (overlayHover === 'hit' || overlayBusy);
 
 function saveWindowBounds() {
   if (!overlayWindow) return;
@@ -287,7 +326,6 @@ function registerIPC() {
     assertTrustedSender(event);
     const safe = sanitizeSetting(keyPath, value);
     const updated = settings.set(safe.keyPath, safe.value);
-    if (safe.keyPath === 'overlay.opacity') overlayWindow?.setOpacity(safe.value);
     if (safe.keyPath === 'overlay.visible') {
       safe.value ? showOverlay() : hideOverlay();
       broadcastToAll('overlay-visibility-changed', safe.value);
@@ -306,32 +344,74 @@ function registerIPC() {
   });
 
   // ── Overlay controls ──────────────────────────────────────────────────────
+  // "Locked" in the IPC names = pinned (click-through even when hovered).
   ipcMain.on('overlay:toggle-interact', (event) => {
     if (!fromTrustedSender(event)) return;
-    toggleOverlayLock();
+    toggleOverlayPin();
   });
   ipcMain.handle('overlay:set-locked', (event, locked) => {
     assertTrustedSender(event);
     if (typeof locked !== 'boolean') throw new Error('Invalid lock value');
-    setOverlayLocked(locked);
-    return !isInteractable;
+    setOverlayPinned(locked);
+    return overlayPinned;
   });
-  // Resize grip in the overlay (only while unlocked).
+  // Resize grip and top-bar drag in the overlay (only while it has the mouse).
   let saveBoundsTimer = null;
+  const saveBoundsSoon = () => {
+    clearTimeout(saveBoundsTimer);
+    saveBoundsTimer = setTimeout(saveWindowBounds, 300);
+  };
   ipcMain.on('overlay:resize', (event, width, height) => {
     if (!fromTrustedSender(event)) return;
-    if (!overlayWindow || overlayWindow.isDestroyed() || !isInteractable) return;
+    if (!overlayWindow || overlayWindow.isDestroyed() || !overlayHasMouse()) return;
     const w = Math.round(Number(width));
     const h = Math.round(Number(height));
     if (!Number.isFinite(w) || !Number.isFinite(h)) return;
     const { x, y } = overlayWindow.getBounds();
     overlayWindow.setBounds({ x, y, width: Math.min(Math.max(w, 260), 1600), height: Math.min(Math.max(h, 160), 2000) });
-    clearTimeout(saveBoundsTimer);
-    saveBoundsTimer = setTimeout(saveWindowBounds, 300);
+    saveBoundsSoon();
+  });
+  ipcMain.on('overlay:move', (event, x, y) => {
+    if (!fromTrustedSender(event)) return;
+    if (!overlayWindow || overlayWindow.isDestroyed() || !overlayHasMouse()) return;
+    const nx = Math.round(Number(x));
+    const ny = Math.round(Number(y));
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+    const { width, height } = overlayWindow.getBounds();
+    // Keep the top bar reachable on some display.
+    const onScreen = screen.getAllDisplays().some(({ workArea: a }) =>
+      nx + width > a.x + 40 && nx < a.x + a.width - 40 && ny >= a.y - 10 && ny < a.y + a.height - 30);
+    if (!onScreen) return;
+    overlayWindow.setBounds({ x: nx, y: ny, width, height });
+    saveBoundsSoon();
+  });
+  // A drag or resize is in progress: keep taking the mouse even if the
+  // cursor runs ahead of the window.
+  ipcMain.on('overlay:busy', (event, busy) => {
+    if (!fromTrustedSender(event)) return;
+    overlayBusy = busy === true && !overlayPinned;
+    updateHover();
+  });
+  // The overlay's hot spots (rectangles that take the mouse), in window DIP.
+  ipcMain.on('overlay:hit-regions', (event, regions) => {
+    if (!fromTrustedSender(event) || event.sender !== overlayWindow?.webContents) return;
+    if (!Array.isArray(regions) || regions.length > 32) return;
+    const safe = [];
+    for (const r of regions) {
+      const v = [r?.x, r?.y, r?.w, r?.h].map(Number);
+      if (!v.every(Number.isFinite) || v[2] <= 0 || v[3] <= 0) continue;
+      safe.push({ x: v[0], y: v[1], w: v[2], h: v[3] });
+    }
+    hitRegions = safe;
+    updateHover();
   });
   ipcMain.handle('overlay:get-locked', (event) => {
     assertTrustedSender(event);
-    return !isInteractable;
+    return overlayPinned;
+  });
+  ipcMain.handle('overlay:get-hover', (event) => {
+    assertTrustedSender(event);
+    return overlayHover;
   });
   ipcMain.handle('hotkeys:status', (event) => {
     assertTrustedSender(event);
@@ -514,7 +594,7 @@ function registerShortcuts() {
     broadcastToAll('overlay-visibility-changed', nowVisible);
   });
 
-  hotkeyStatus.interact = tryRegister(hotkey_interact, toggleOverlayLock);
+  hotkeyStatus.interact = tryRegister(hotkey_interact, toggleOverlayPin);
   sendToWindows('hotkeys-status', hotkeyStatus);
 }
 
@@ -611,7 +691,7 @@ app.whenReady().then(() => {
   registerUpdateIPC();
   registerShortcuts();
   tray.create(overlayWindow, controlWindow, {
-    toggleLock: toggleOverlayLock,
+    toggleLock: toggleOverlayPin,
     showOverlay,
     hideOverlay,
     onVisibilityChanged: (v) => broadcastToAll('overlay-visibility-changed', v),
@@ -639,6 +719,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   logWatcher.stopWatching();
+  stopHoverWatch();
   tray.destroy();
   appLogger.log('main', 'info', 'App shutting down');
 });

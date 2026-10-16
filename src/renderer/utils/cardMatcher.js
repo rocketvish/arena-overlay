@@ -233,7 +233,10 @@ export function matchCards(cards, setCode) {
       color:    lands?.color ?? card.color ?? scryfallData?.colorIdentity ?? '',
       rarity:   lands?.rarity ?? card.rarity ?? scryfallData?.rarity ?? 'common',
       cmc:      lands?.cmc ?? card.cmc ?? scryfallData?.cmc ?? null,
-      // Collector number from 17Lands array index — drives Arena visual sort order.
+      // Type line and mana cost feed the Arena pack sort (lands last, X spells last).
+      typeLine: lands?.typeLine ?? card.typeLine ?? '',
+      manaCost: lands?.manaCost ?? card.manaCost ?? null,
+      // Position in 17Lands' card list (≈ collector number − 1).
       collectorNumber: lands?.collectorNumber ?? null,
       stats:    lands?.stats ?? null,
       // true = found in 17Lands (may still have null grade if data not yet available)
