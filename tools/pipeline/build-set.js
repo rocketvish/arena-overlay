@@ -447,14 +447,23 @@ async function main() {
 
   const cardList = await loadCardList(args.set);
   const draft = await ensureDataset('draft_data', args.set, args.format, args.cache);
-  const game = await ensureDataset('game_data', args.set, args.format, args.cache);
+  // Game data lands about a week after draft data. Until then, build a
+  // draft-only table: pick model, wheel rates and ATA (no win rates, deck
+  // win model, mulligan or archetype stats).
+  let game = null;
+  try {
+    game = await ensureDataset('game_data', args.set, args.format, args.cache);
+  } catch (e) {
+    if (!/not published/.test(e.message)) throw e;
+    console.log('  game data not published yet — building a draft-only table');
+  }
 
   const { names, indexByName } = await readCardIndex(draft.file);
   const nCards = names.length;
   const unmapped = names.filter((nm) => !cardList.has(normCardName(nm)));
   console.log(`  ${nCards} cards in dataset; ${unmapped.length} without an Arena id${unmapped.length ? ': ' + unmapped.slice(0, 5).join(', ') : ''}`);
 
-  console.log('  game data pass…');
+  if (game) console.log('  game data pass…');
   const BASICS = new Set(['plains', 'island', 'swamp', 'mountain', 'forest', 'wastes']);
   const isLand = (nm) => {
     const key = normCardName(nm);
@@ -462,8 +471,8 @@ async function main() {
     const meta = cardList.get(key);
     return !!meta && meta.types.some((t) => /\bLand\b/.test(t)) && !meta.types.some((t) => /\bCreature\b/.test(t));
   };
-  const g = await gamePass(game.file, nCards, (nm) => indexByName.get(normCardName(nm)), isLand);
-  console.log(`    ${g.games} games`);
+  const g = game ? await gamePass(game.file, nCards, (nm) => indexByName.get(normCardName(nm)), isLand) : null;
+  if (g) console.log(`    ${g.games} games`);
   console.log('  draft data pass…');
   const d = await draftPass(draft.file, nCards, (nm) => indexByName.get(normCardName(nm)));
   console.log(`    ${d.drafts} drafts, ${d.picks} picks, pack size ${d.packSize}; ${d.train.taken.length} top-player training picks, ${d.evalDrafts.length} held-out drafts`);
@@ -480,7 +489,7 @@ async function main() {
 
   // Deck win model. Optional: a set still ships without it if this fails.
   let value = null;
-  try {
+  if (game) try {
     console.log('  deck win model…');
     const colorById = new Map([...cardList.values()].map((m) => [m.mtgaId, m.color]));
     ({ value } = await winModel.buildValueBlock({ set: args.set, gameFile: game.file, draftFile: draft.file, cache: args.cache, cardColor: (id) => colorById.get(id) }));
@@ -496,7 +505,7 @@ async function main() {
     if (!meta) continue;
     const rate = (w, n) => (n > 0 ? r4(w / n) : null);
     const pairs = {};
-    for (const [pair, pp] of Object.entries(g.pairs)) {
+    for (const [pair, pp] of Object.entries(g?.pairs ?? {})) {
       if (pp.n[c] >= 20) pairs[pair] = [r4(pp.w[c] / pp.n[c]), pp.n[c]];
     }
     // Weighted counts: ≥ 30 effective observations for a measured rate.
@@ -504,15 +513,17 @@ async function main() {
     cards[meta.mtgaId] = {
       name: meta.name, color: meta.color, rarity: meta.rarity, types: meta.types,
       order: meta.order, // position in 17Lands' card list ≈ collector number (Arena pack sort)
-      gih: rate(g.agg.gihW[c], g.agg.gihN[c]), gihN: g.agg.gihN[c],
-      oh: rate(g.agg.ohW[c], g.agg.ohN[c]), ohN: g.agg.ohN[c],
-      gp: rate(g.agg.gpW[c], g.agg.gpN[c]), gpN: g.agg.gpN[c],
-      gns: rate(g.agg.gnsW[c], g.agg.gnsN[c]),
+      ...(g ? {
+        gih: rate(g.agg.gihW[c], g.agg.gihN[c]), gihN: g.agg.gihN[c],
+        oh: rate(g.agg.ohW[c], g.agg.ohN[c]), ohN: g.agg.ohN[c],
+        gp: rate(g.agg.gpW[c], g.agg.gpN[c]), gpN: g.agg.gpN[c],
+        gns: rate(g.agg.gnsW[c], g.agg.gnsN[c]),
+      } : { gih: null, gihN: 0, oh: null, ohN: 0, gp: null, gpN: 0, gns: null }),
       ata: agg.ataN[c] > 0 ? Math.round((agg.ataSum[c] / agg.ataN[c]) * 100) / 100 : null,
       pairs, wheel,
       // How decks of each pair run the card: [share of decks with ≥ 1, mean
       // copies in those decks] — for reading an opponent's likely hand.
-      deck: Object.fromEntries(Object.entries(g.pairs).flatMap(([pair, pp]) => {
+      deck: Object.fromEntries(Object.entries(g?.pairs ?? {}).flatMap(([pair, pp]) => {
         const games = g.decks[pair]?.n ?? 0;
         if (games < 200 || pp.has[c] / games < 0.002) return [];
         return [[pair, [r4(pp.has[c] / games), Math.round((pp.copies[c] / pp.has[c]) * 100) / 100]]];
@@ -528,12 +539,13 @@ async function main() {
     generatedAt: new Date().toISOString(),
     source: {
       attribution: 'Derived from 17Lands public datasets (https://www.17lands.com/public_datasets), CC BY 4.0',
-      draftDataModified: draft.modified, gameDataModified: game.modified,
-      drafts: d.drafts, games: g.games, packSize: d.packSize,
+      draftDataModified: draft.modified, gameDataModified: game?.modified ?? null,
+      drafts: d.drafts, games: g?.games ?? 0, packSize: d.packSize,
+      ...(game ? {} : { partial: 'draft-only' }),
     },
     // Same shape as 17landsData.fetchColorRatings().pairs, so it can stand in for it.
     // Keep-vs-mulligan win rates: keep7[play|draw][lands] = [winRate, games].
-    mulligan: (() => {
+    mulligan: g && (() => {
       const rate = ([w, n]) => [n ? r4(w / n) : null, n];
       return {
         keep7: { play: g.mull.keep7.play.map(rate), draw: g.mull.keep7.draw.map(rate) },
@@ -541,7 +553,7 @@ async function main() {
         mull5: { play: rate(g.mull.mull5.play), draw: rate(g.mull.mull5.draw) },
       };
     })(),
-    pairs: Object.fromEntries(Object.entries(g.decks).map(([p, x]) => [p, {
+    pairs: g && Object.fromEntries(Object.entries(g.decks).map(([p, x]) => [p, {
       games: x.n, wins: x.w, topgames: x.topN, topwins: x.topW,
       wr: x.n ? r4(x.w / x.n) : null, topWr: x.topN ? r4(x.topW / x.topN) : null,
     }])),

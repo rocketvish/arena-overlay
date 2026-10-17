@@ -445,6 +445,13 @@ async function main() {
   // Compute set metrics for signal baseline
   const ratings = await landsData.fetchColorRatings(setCode).catch(() => null);
   const setMetrics = signalAnalyzer.computeSetMetrics(landsCards, ratings);
+  // The per-set table, as the app loads it (published, cached, or bundled
+  // data/sets/<SET>.json): pick model, wheel rates, deck win model.
+  setMetrics.table = await require('../src/main/setData').loadSetTable(setCode).catch(() => null);
+  if (setMetrics.table) {
+    const t = setMetrics.table;
+    console.log(`  Set table: ${t.source?.partial === 'draft-only' ? 'draft data only' : 'full'}; pick model ${t.model ? 'yes' : 'no'}; deck win model ${t.valueTable ? 'from table' : 'from cross-set prior'}`);
+  }
   if (setMetrics.pairs) {
     const top = Object.entries(setMetrics.pairs).sort((a, b) => b[1].wr - a[1].wr).slice(0, 3)
       .map(([p, v]) => `${p} ${(v.wr * 100).toFixed(1)}% (${v.cohort})`).join(', ');

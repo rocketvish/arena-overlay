@@ -109,14 +109,16 @@ async function main() {
 
   async function updateOne(set) {
     const dates = await datasetDates(set);
-    if (!dates.draft_data || !dates.game_data) {
+    if (!dates.draft_data) {
       console.log(`${set}: public datasets not published yet — skipping`);
       return;
     }
+    // Draft data alone builds a draft-only table (pick model, wheel rates);
+    // the full table follows when game data appears (its date changes).
     const pub = await publishedSource(set);
-    const unchanged = pub && pub.draftDataModified === dates.draft_data && pub.gameDataModified === dates.game_data;
+    const unchanged = pub && pub.draftDataModified === dates.draft_data && (pub.gameDataModified ?? null) === (dates.game_data ?? null);
     if (unchanged && !force) {
-      console.log(`${set}: up to date (data from ${dates.game_data})`);
+      console.log(`${set}: up to date (data from ${dates.game_data ?? `${dates.draft_data}, draft data only`})`);
       return;
     }
     console.log(`${set}: ${pub ? 'datasets changed' : 'no published table yet'} — ${dry ? 'would build' : 'building'}`);

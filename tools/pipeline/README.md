@@ -105,8 +105,14 @@ node --max-old-space-size=8192 tools/pipeline/win-research.js HOB          # hel
 node --max-old-space-size=12000 tools/pipeline/win-policy.js HOB --taus 0.05 --lambdas 0.01,0.02
 ```
 
-Public data appears ~2 weeks (drafts) / ~3 weeks (games) into a set. Until then the
-overlay runs on live 17Lands numbers and its model-free weights.
+Public data appears ~2 weeks (drafts) / ~3 weeks (games) into a set. As soon as the draft
+data is out, a **draft-only** table is built and published (pick model, wheel rates, ATA;
+`source.partial = 'draft-only'`); the full table replaces it when the game data appears.
+Until then the app runs on live 17Lands numbers and the cross-set prior (below).
+
+Note: the live `card_ratings/data` endpoint ignores date parameters and serves a rolling
+recent window, so its game counts can go *down* and low-play cards drop to "no GIH" — that's
+the endpoint, not a stale cache.
 
 ## Build
 
