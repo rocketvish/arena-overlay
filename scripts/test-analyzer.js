@@ -58,10 +58,20 @@ const metrics = sa.computeSetMetrics(cards, {
 console.log('\nGrading');
 
 test('GIH cards keep the classic z-score grade', () => {
-  assert.strictEqual(byName['Card 59'].stats.grade, 'A');   // top of distribution (z ≈ +1.7)
-  assert.strictEqual(byName['Card 0'].stats.grade, 'F');    // bottom (z ≈ −1.73, below the D- band)
+  // Top of distribution (raw z ≈ +1.7); 3000 drawn games shrink it a little.
+  assert.ok(['A', 'A-'].includes(byName['Card 59'].stats.grade), byName['Card 59'].stats.grade);
+  assert.ok(['F', 'D-'].includes(byName['Card 0'].stats.grade), byName['Card 0'].stats.grade); // bottom (raw z ≈ −1.73)
   assert.strictEqual(byName['Card 30'].stats.grade, 'C+');  // middle
   assert.strictEqual(byName['Card 59'].stats.gradeEstimated, false);
+});
+
+test('a high GIH on few games is graded more cautiously than the same GIH on many', () => {
+  const extra = (name, id, n) => ({ name, mtga_id: id, color: 'W', rarity: 'uncommon', types: ['Creature'],
+    ever_drawn_win_rate: 0.63, ever_drawn_game_count: n, win_rate: 0.58, game_count: n * 2, avg_seen: 3, avg_pick: 3 });
+  const cards = buildCardData([...raw, extra('Few', 3001, 520), extra('Many', 3002, 8000)]);
+  const few = cards.find((c) => c.name === 'Few').stats, many = cards.find((c) => c.name === 'Many').stats;
+  assert.ok(few.z < many.z - 0.2, `520 games z ${few.z.toFixed(2)} vs 8000 games z ${many.z.toFixed(2)}`);
+  assert.strictEqual(few.gihwr, 0.63, 'the displayed GIH WR stays 17Lands\' number');
 });
 
 test('withheld-GIH cards get an estimated grade on the GIH scale', () => {

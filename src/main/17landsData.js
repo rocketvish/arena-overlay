@@ -206,6 +206,18 @@ function computeGrades(rawCards) {
   const gihOk = (c) => c.ever_drawn_win_rate != null && (c.ever_drawn_game_count ?? 0) >= MIN_SAMPLE;
   const gihCards = rawCards.filter(gihOk);
   const gih = computeMeanStd(gihCards.map((c) => c.ever_drawn_win_rate));
+  // GIH WR itself is noisy for low-play cards: 17Lands publishes it from 500
+  // drawn games, where its margin of error (±2 points) is nearly a grade step,
+  // and the live endpoint's rolling window keeps some cards near that line.
+  // Grade on GIH shrunk toward the set mean by its sample size (empirical
+  // Bayes: true spread = observed spread − sampling noise); cards with
+  // thousands of games barely move.
+  const gihNoise = (c) => (c.ever_drawn_win_rate * (1 - c.ever_drawn_win_rate)) / c.ever_drawn_game_count;
+  const gihTau2 = gihCards.length >= 10
+    ? Math.max(gih.std ** 2 - gihCards.reduce((sum, c) => sum + gihNoise(c), 0) / gihCards.length, gih.std ** 2 * 0.25)
+    : null;
+  const shrinkGih = (c) => (gihTau2 == null ? c.ever_drawn_win_rate
+    : gih.mean + (gihTau2 / (gihTau2 + gihNoise(c))) * (c.ever_drawn_win_rate - gih.mean));
 
   const none = () => rawCards.map(() => ({ grade: null, z: null, gihwrEst: null, gradeEstimated: false, lowSample: true }));
 
@@ -249,8 +261,9 @@ function computeGrades(rawCards) {
 
   return rawCards.map((c) => {
     if (gihOk(c)) {
-      const z = (c.ever_drawn_win_rate - gih.mean) / gih.std;
-      return { grade: calcGrade(z), z, gihwrEst: null, gradeEstimated: false, lowSample: false };
+      const shrunk = shrinkGih(c);
+      const z = (shrunk - gih.mean) / gih.std;
+      return { grade: calcGrade(z), z, gihwrEst: null, gihwrShrunk: shrunk, gradeEstimated: false, lowSample: false };
     }
     const n = c.game_count ?? 0;
     if (b != null && c.win_rate != null && n >= MIN_EST_GAMES) {
