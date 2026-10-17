@@ -92,6 +92,13 @@ const PICK_KIND_META = {
   need:   { icon: '🔧', color: '#e88c64', label: 'Need',   bg: 'rgba(232,140,100,0.10)', border: 'rgba(232,140,100,0.32)' },
   clear:  { icon: '★', color: '#7ec8a0', label: 'Clear pick', bg: 'rgba(126,200,160,0.12)', border: 'rgba(126,200,160,0.34)' },
   wheel:  { icon: '⟲', color: '#c89cff', label: 'Wheel play', bg: 'rgba(200,156,255,0.10)', border: 'rgba(200,156,255,0.32)' },
+  // With the deck win model: one card per tradeoff.
+  best:      { icon: '★', color: '#7ec8a0', label: 'Best for deck', bg: 'rgba(126,200,160,0.12)', border: 'rgba(126,200,160,0.34)' },
+  strongest: { icon: '⚡', color: '#ffce5c', label: 'Strongest',     bg: 'rgba(255,206,92,0.10)', border: 'rgba(255,206,92,0.32)' },
+  removal:   { icon: '✕', color: '#ff8a7a', label: 'Removal',       bg: 'rgba(255,138,122,0.10)', border: 'rgba(255,138,122,0.32)' },
+  backup:    { icon: '↪', color: '#8fb8ff', label: 'Backup',        bg: 'rgba(143,184,255,0.10)', border: 'rgba(143,184,255,0.32)' },
+  splash:    { icon: '◆', color: '#d6a2ff', label: 'Splash',        bg: 'rgba(214,162,255,0.10)', border: 'rgba(214,162,255,0.32)' },
+  alt:       { icon: '·', color: '#aaa',    label: 'Also good',     bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.14)' },
 };
 
 function PickOptionCard({ pick }) {
@@ -117,15 +124,21 @@ function PickOptionCard({ pick }) {
           <span style={{ fontSize: 14, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {card?.name ?? `#${card?.grpId ?? '?'}`}
           </span>
+          {pick.winPct != null && (
+            <span style={{ fontSize: 12, fontWeight: 800, color: pick.winPct >= 0.05 ? '#7cff8c' : '#777', marginLeft: 'auto', flexShrink: 0, fontFamily: 'monospace' }}
+                  title="Points this card adds to your projected deck's win rate">
+              {pick.winPct >= 0 ? '+' : ''}{pick.winPct.toFixed(1)}
+            </span>
+          )}
           {grade && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: gradeColor, marginLeft: 'auto', flexShrink: 0 }}
+            <span style={{ fontSize: 11, fontWeight: 700, color: gradeColor, marginLeft: pick.winPct != null ? 6 : 'auto', flexShrink: 0 }}
                   title={card?.stats?.gradeEstimated ? 'Estimated: 17Lands withholds GIH% under 500 games' : undefined}>
               {card?.stats?.gradeEstimated ? `~${grade}` : grade}
             </span>
           )}
         </div>
-        <div style={{ fontSize: 11, color: '#aaa', marginTop: 2, lineHeight: 1.35 }}>
-          {pick.reasonLong ?? pick.reason}
+        <div style={{ fontSize: 11, color: '#aaa', marginTop: 2, lineHeight: 1.35 }} title={pick.reasonLong ?? undefined}>
+          {pick.reason ?? pick.reasonLong}
         </div>
       </div>
     </div>

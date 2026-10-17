@@ -918,6 +918,109 @@ function communityNote(card) {
   return ata != null ? `17Lands drafters take it ~pick ${ata.toFixed(1)}` : null;
 }
 
+// ─── Pick options with the win model ──────────────────────────────────────────
+
+const MAX_OPTIONS = 5;
+// A deck need is worth calling out when one more such card adds ≥ 0.1 points.
+const NEED_MIN_GAIN = 0.004;
+const NEED_LABEL = { creatures: 'creature', twoDrops: 'two-drop', removal: 'removal' };
+
+/** "GIH 59.1%" / "GIH ~57% est." / "no GIH yet". */
+function gihLabel(card) {
+  const s = card?.stats;
+  if (s?.gihwr != null) return `GIH ${(s.gihwr * 100).toFixed(1)}%`;
+  if (s?.gihwrEst != null) return `GIH ~${(s.gihwrEst * 100).toFixed(0)}% est.`;
+  return 'no GIH yet';
+}
+
+/** "(3rd copy)" when you already have the card. */
+function copyNote(card, ctx) {
+  const have = ctx.pickedCards.filter((c) => c.grpId === card.grpId).length;
+  if (!have) return null;
+  const nth = ['', '', '2nd', '3rd', '4th', '5th'][have + 1] ?? `${have + 1}th`;
+  return `${nth} copy`;
+}
+
+/**
+ * Up to MAX_OPTIONS different cards, each with what it's for, so the
+ * tradeoffs are visible: best for the deck, strongest card, what fills the
+ * biggest need, removal, the backup pair, a splash, a wheel play. Every
+ * option carries its deck win value and GIH WR.
+ */
+function buildWinOptions(scored, ctx) {
+  const win = ctx.win;
+  const options = [];
+  const listed = new Set();
+  const winOf = (s) => s.parts.win ?? 0;
+  const add = (kind, entry, why) => {
+    if (!entry || listed.has(entry.card.grpId) || options.length >= MAX_OPTIONS) return;
+    listed.add(entry.card.grpId);
+    const card = entry.card;
+    const notes = [copyNote(card, ctx)];
+    const reason = [why, `${fmtWin(winOf(entry))} deck win`, gihLabel(card), ...notes].filter(Boolean).join(' · ');
+    options.push({ kind, card, reason, reasonLong: reason, winPct: Math.round(winOf(entry) * 100) / 100, gih: card.stats?.gihwr ?? card.stats?.gihwrEst ?? null });
+  };
+  const top = scored[0];
+  if (!top) return options;
+
+  // 1. Best for the deck (what the rule ranks first).
+  const nothing = winOf(top) < NOTHING_HELPS_PP;
+  const hedge = hedgeNote(top.card, ctx);
+  add(nothing ? 'safe' : 'best', top, nothing ? 'Nothing here improves your deck — best card as a hedge'
+    : hedge ? `Best pick — ${hedge.charAt(0).toLowerCase()}${hedge.slice(1)}` : ['Best for your deck', shapeNote(top.card, ctx)].filter(Boolean).join(', '));
+
+  // 2. The runner-up for the deck — the closest alternative.
+  const second = scored.find((s) => s !== top && winOf(s) >= NOTHING_HELPS_PP);
+  if (second && !nothing) add('alt', second, 'Next best for your deck');
+
+  // 3. Strongest card by 17Lands GIH WR, if that's a different card.
+  const byGih = scored.filter((s) => cardZ(s.card, ctx.setMetrics) != null)
+    .sort((a, b) => (cardZ(b.card, ctx.setMetrics) ?? -9) - (cardZ(a.card, ctx.setMetrics) ?? -9))[0];
+  if (byGih && byGih.card.grpId !== top.card.grpId) {
+    add('strongest', byGih, winOf(byGih) < NOTHING_HELPS_PP ? 'Strongest card — but it doesn\'t fit your deck' : 'Strongest card');
+  }
+
+  // 4. What fills the deck's biggest needs (creatures, two-drops, removal).
+  const needs = Object.entries(win.needs ?? {})
+    .filter(([name, v]) => NEED_LABEL[name] && v.gain > NEED_MIN_GAIN)
+    .sort((a, b) => b[1].gain - a[1].gain);
+  for (const [name, v] of needs) {
+    const entry = scored.find((s) => !listed.has(s.card.grpId) && winOf(s) >= NOTHING_HELPS_PP && cardShapeTraits(s.card).includes(name));
+    if (entry) add(name === 'removal' ? 'removal' : 'need', entry, `Fills a ${NEED_LABEL[name]} need (you have ~${Math.round(v.count)})`);
+  }
+
+  // 5. Removal, even when the deck isn't short on it.
+  const removal = scored.find((s) => !listed.has(s.card.grpId) && winOf(s) >= NOTHING_HELPS_PP && cardShapeTraits(s.card).includes('removal'));
+  if (removal) add('removal', removal, 'Removal');
+
+  // 6. Backup pair: the best card whose value is mostly outside your likeliest pair.
+  const backup = scored.find((s) => !listed.has(s.card.grpId) && winOf(s) >= NOTHING_HELPS_PP && hedgeNote(s.card, ctx));
+  if (backup) add('backup', backup, hedgeNote(backup.card, ctx));
+
+  // 7. A splash candidate for your likeliest pair.
+  const pair = win.topPair;
+  const splash = scored.find((s) => {
+    if (listed.has(s.card.grpId) || winOf(s) < NOTHING_HELPS_PP) return false;
+    const cs = cardColorsOf(s.card);
+    const off = [...cs].filter((c) => !pair.includes(c));
+    return off.length === 1 && (cardZ(s.card, ctx.setMetrics) ?? -9) >= winValue.SPLASH.minZ && pipsOf(s.card)[off[0]] <= winValue.SPLASH.maxPips;
+  });
+  if (splash) add('splash', splash, `Splash ${[...cardColorsOf(splash.card)].filter((c) => !pair.includes(c)).join('')} in ${pair}`);
+
+  // 8. Wheel: the top card usually comes back, the runner-up doesn't.
+  const runnerUp = scored.find((s) => s !== top && !listed.has(s.card.grpId));
+  if (runnerUp && top.wheel?.likely && !(runnerUp.wheel?.prob >= 0.35) && top.total - runnerUp.total < (ctx.wheelMargin ?? 0.06)) {
+    add('wheel', runnerUp, `${top.card.name} comes back ~${Math.round(top.wheel.prob * 100)}% of the time — take this now and maybe get both`);
+  }
+
+  // Late in packs (or when little separates them) fill up to 3 with the next-best cards.
+  for (const s of scored) {
+    if (options.length >= 3) break;
+    if (!listed.has(s.card.grpId) && winOf(s) >= NOTHING_HELPS_PP) add('alt', s, 'Next best for your deck');
+  }
+  return options;
+}
+
 function buildPickOptions(scored, ctx) {
   const safeEntry = scored[0];
   const safe = safeEntry?.card ?? null;
@@ -1062,7 +1165,7 @@ function computeRecommendation(packCards, ctx, tier3) {
   const secondary = scored.length > 1 && (scored[0].total - scored[1].total) < ctx.closeMargin
     ? scored[1].card : null;
 
-  const picks = buildPickOptions(scored, ctx);
+  const picks = win ? buildWinOptions(scored, ctx) : buildPickOptions(scored, ctx);
 
   // Attach synergy notes to pick reasons so the UI can show them inline.
   for (const p of picks) {
@@ -1198,6 +1301,7 @@ function cardInfo(cards, setMetrics) {
       pips: cardTraits.pipsOf(c.manaCost, c.color),
       z: cardZ(c, setMetrics),
       land: isLandCard(c),
+      legendary: /\bLegendary\b/.test(c.typeLine ?? ''),
       fixes: cardTraits.fixingColors(c),
     });
   }
@@ -1214,7 +1318,7 @@ function hedgeNote(card, ctx) {
   const inTop = win?.topGain?.get(card.grpId) ?? 0;
   if (!total || total <= 0 || inTop > 0.25 * total) return null;
   const backup = Object.entries(win.pairProbs ?? {}).filter(([p]) => p !== win.topPair).sort((a, b) => b[1] - a[1])[0];
-  return backup ? `for your ${backup[0]} backup — doesn't help ${win.topPair}` : null;
+  return backup ? `For your ${backup[0]} backup (doesn't help ${win.topPair})` : null;
 }
 
 // Below this lift (win-rate points) no card in the pack really helps the deck.

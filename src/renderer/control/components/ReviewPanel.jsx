@@ -6,7 +6,7 @@ function fmtDate(iso) {
   try { return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return iso; }
 }
 
-const KIND_COLOR = { safe: '#7ec8ff', clear: '#7ec8a0', upside: '#ffce5c', need: '#e88c64', wheel: '#c89cff' };
+const KIND_COLOR = { safe: '#7ec8ff', clear: '#7ec8a0', upside: '#ffce5c', need: '#e88c64', wheel: '#c89cff', best: '#7ec8a0', strongest: '#ffce5c', removal: '#ff8a7a', backup: '#8fb8ff', splash: '#d6a2ff', alt: '#aaa' };
 
 export default function ReviewPanel() {
   const [list, setList] = useState([]);

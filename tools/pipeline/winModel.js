@@ -173,6 +173,9 @@ function features(games, g, L, use) {
       if (use.cardPair && p >= 0) { idx.push(L.cardPair + d[k] * PAIRS.length + p); val.push(d[k + 1]); }
     }
   }
+  // Research hook: extra features, [[index, value], …] (indices ≥ L.size of
+  // the base layout; the caller enlarges L.size).
+  if (use.extra) for (const [i, v] of use.extra(g)) { if (v) { idx.push(i); val.push(v); } }
   return { idx, val };
 }
 

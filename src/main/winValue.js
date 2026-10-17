@@ -228,6 +228,12 @@ function splashColors(info) {
   });
 }
 
+// A 2nd+ copy of a legendary card is worth less (legend rule): measured in
+// 17Lands games at about −0.4 to −0.6 win-rate points per extra copy
+// (tools/pipeline/dup-research.js). Extra copies of other cards showed no
+// consistent penalty, so they keep full value.
+const LEGEND_DUP = 0.02;
+
 const splashEff = (fixers) => SPLASH.base + SPLASH.perFix * Math.min(fixers, SPLASH.maxFix);
 
 /**
@@ -236,12 +242,17 @@ const splashEff = (fixers) => SPLASH.base + SPLASH.perFix * Math.min(fixers, SPL
  */
 function poolCards(vt, poolIds, info = null) {
   const pool = [];
+  const seen = new Map();
   for (const id of poolIds) {
     const c = vt.cards.get(id);
     if (!c) continue;
     const i = info?.get(id);
-    pool.push(i ? { ...c, splash: splashColors(i), fixes: i.fixes ?? '' } : c);
+    const n = (seen.get(id) ?? 0) + 1;
+    seen.set(id, n);
+    const w = i?.legendary && n > 1 ? c.w - LEGEND_DUP : c.w;
+    pool.push(i ? { ...c, w, splash: splashColors(i), fixes: i.fixes ?? '' } : c);
   }
+  pool.copies = seen;
   return pool;
 }
 
@@ -338,9 +349,11 @@ function scorePack(vtIn, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU, pickS
     const c = vt.cards.get(id);
     if (!c) continue;
     const ci = info?.get(id) ?? null;
+    const dupLegend = ci?.legendary && (decks[0].pool.copies?.get(id) ?? 0) > 0;
+    const cc = dupLegend ? { ...c, w: c.w - LEGEND_DUP } : c;
     const vals = Float64Array.from(base);
     for (let p = 0; p < PAIRS.length; p++) {
-      const r = pairWithCard(vt, decks[p], p, c, ci, next, pickShift?.[p] ?? 0);
+      const r = pairWithCard(vt, decks[p], p, cc, ci, next, pickShift?.[p] ?? 0);
       vals[p] = r.value + vt.pairBias[p];
       if (p === top) { shape.set(id, r.shapeGain); topGain.set(id, r.value - decks[p].value); }
     }
@@ -379,4 +392,4 @@ function poolValue(vt, poolIds, opts = {}) {
   return { value: v[best], pair: PAIRS[best], byPair: v };
 }
 
-module.exports = { PAIRS, SHAPE, SPELLS, DEFAULT_TAU, SPLASH, castMask, cardMask, prepareValue, pairValues, scorePack, poolValue, shapeValue, splashColors };
+module.exports = { PAIRS, SHAPE, SPELLS, DEFAULT_TAU, SPLASH, LEGEND_DUP, castMask, cardMask, prepareValue, pairValues, scorePack, poolValue, shapeValue, splashColors };

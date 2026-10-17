@@ -164,7 +164,7 @@ test('archetype data steers the second color toward winning pairs', () => {
 test('estimated grades are labelled as estimates in pick reasons', () => {
   const a = sa.analyze(tracker(), asPack('Strong Rare', 'Card 10'), { packNumber: 0, pickNumber: 0, packSize: 14 }, {});
   assert.strictEqual(a.recommendation.primary.name, 'Strong Rare');
-  assert.match(a.recommendation.picks[0].reason, /~[AB][+-]?, est/);
+  assert.match(a.recommendation.picks[0].reason, /GIH ~\d+% est\./);
 });
 
 test('deck needs use total picks, not pick-within-pack', () => {
@@ -305,7 +305,7 @@ test('analyzer ranks by the win rule when the set table has a value block', () =
   const a = sa.analyze({ packHistory: [], pickHistory: pool, setMetrics: metricsWin, packSize: 14 }, [mk(101), mk(102)], { packNumber: 2, pickNumber: 10, packSize: 14 }, {});
   assert.strictEqual(a.recommendation.primary.grpId, 101);
   assert.ok(a.recommendation.win.byCard[101] > a.recommendation.win.byCard[102]);
-  assert.match(a.recommendation.picks[0].reason, /deck win rate/);
+  assert.match(a.recommendation.picks[0].reason, /deck win/);
 });
 
 console.log('\nSplash, fixing, new sets');
