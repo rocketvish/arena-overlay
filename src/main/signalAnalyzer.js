@@ -326,6 +326,97 @@ function computeColorSignals(packHistory, setMetrics, confidenceThreshold, curre
   return signals;
 }
 
+// ─── Openness track, confidence, pivot watch ──────────────────────────────────
+
+/**
+ * How far a color read can be trusted at a 0-based pick within a pack: the
+ * correlation between a color's read and its flow over the next 3 picks,
+ * measured on 17Lands drafts (tools/pipeline/signal-research.js, HOB + SOS
+ * averaged). Nothing to go on for the first picks of a pack.
+ */
+const READ_RELIABILITY = [0, 0, 0.07, 0.12, 0.16, 0.19, 0.22, 0.26, 0.30, 0.32, 0.33, 0.33, 0.33, 0.33, 0.33];
+const CONFIDENCE_LEVELS = [[0.27, 'high'], [0.18, 'medium'], [0.1, 'low'], [-Infinity, 'too early']];
+
+function signalConfidence(pickNumber) {
+  const r = READ_RELIABILITY[Math.min(pickNumber, READ_RELIABILITY.length - 1)];
+  return { r, level: CONFIDENCE_LEVELS.find(([t]) => r >= t)[1] };
+}
+
+const packOrder = (p) => p.packNumber * 100 + p.pickNumber;
+
+/**
+ * The color read after every pack you were passed: [{ packNumber,
+ * pickNumber, scores: {W..G}, hasData, confidence }]. Each point uses only
+ * what you had seen by then.
+ */
+function computeSignalTrack(packHistory, pickHistory, setMetrics, threshold) {
+  const sorted = packHistory.slice().sort((a, b) => packOrder(a) - packOrder(b));
+  const track = [];
+  for (let k = 0; k < sorted.length; k++) {
+    const at = sorted[k];
+    if (at.pickNumber < 1) continue;
+    const seen = sorted.slice(0, k + 1);
+    const picks = (pickHistory ?? []).filter((p) => packOrder(p) < packOrder(at));
+    const sig = computeColorSignals(seen, setMetrics, threshold, at.packNumber, picks);
+    track.push({
+      packNumber: at.packNumber, pickNumber: at.pickNumber,
+      scores: Object.fromEntries(COLORS.map((c) => [c, sig[c].score])),
+      hasData: COLORS.some((c) => sig[c].hasData),
+      confidence: signalConfidence(at.pickNumber).level,
+    });
+  }
+  return track;
+}
+
+/**
+ * A neighbor moving into your color shows as a break within the current
+ * pack: a color that was arriving late stops. On 17Lands drafts, weighting
+ * recent picks barely improved the read on average, so this is a tentative
+ * heads-up for sharp breaks only, mid-pack (late picks are too thin, and
+ * lateness grows with the pick number, so "started flowing" isn't judged).
+ * Lateness per pick, earlier picks vs the last PIVOT_WINDOW.
+ */
+const PIVOT_WINDOW = 3;
+const PIVOT_PICKS = [6, 10]; // 0-based picks where it's judged
+const PIVOT_EARLY_MIN = 1.5;  // lateness per pick before…
+const PIVOT_RECENT_MAX = 0.1; // …and after
+function pivotWatch(packHistory, setMetrics, pos) {
+  if (pos.pickNumber < PIVOT_PICKS[0] || pos.pickNumber > PIVOT_PICKS[1]) return null;
+  const packs = packHistory.filter((p) => p.packNumber === pos.packNumber && p.pickNumber >= 1 && p.pickNumber <= pos.pickNumber);
+  const rate = (from, to) => {
+    const out = Object.fromEntries(COLORS.map((c) => [c, 0]));
+    let n = 0;
+    for (const p of packs) {
+      if (p.pickNumber < from || p.pickNumber > to) continue;
+      n++;
+      for (const card of p.cards ?? []) {
+        const l = lateness(card, p.pickNumber, setMetrics);
+        if (!l) continue;
+        const cs = cardColorsOf(card);
+        for (const ch of cs) out[ch] += l / cs.length;
+      }
+    }
+    return n ? Object.fromEntries(COLORS.map((c) => [c, out[c] / n])) : null;
+  };
+  const early = rate(1, pos.pickNumber - PIVOT_WINDOW);
+  const recent = rate(pos.pickNumber - PIVOT_WINDOW + 1, pos.pickNumber);
+  if (!early || !recent) return null;
+  const side = pos.packNumber === 1 ? 'left' : 'right';
+  const who = setMetrics?.bots ? `bot on your ${side}` : `player on your ${side}`;
+  let best = null;
+  for (const c of COLORS) {
+    if (early[c] >= PIVOT_EARLY_MIN && recent[c] < PIVOT_RECENT_MAX && (!best || early[c] > best.s)) best = { s: early[c], c };
+  }
+  if (!best) return null;
+  const name = COLOR_NAME[best.c];
+  return {
+    tone: 'cut', color: best.c, tentative: true,
+    short: `Possible pivot: ${name} stopped arriving late in the last ${PIVOT_WINDOW} picks — the ${who} may have moved into it (tentative)`,
+    detail: `${name} lateness per pick: ${early[best.c].toFixed(1)} earlier in this pack vs ${recent[best.c].toFixed(1)} recently. Sharp breaks like this can be a neighbor switching colors, or just the packs.`,
+    strength: 0,
+  };
+}
+
 // ─── Deck Composition ─────────────────────────────────────────────────────────
 
 function computeDeckComposition(pickedCards) {
@@ -1498,6 +1589,8 @@ function analyze(trackerState, packCards, position, settings) {
   const picksMade = pickHistory.length;
 
   const colorSignals = computeColorSignals(packHistory, setMetrics, confidenceThreshold, pos.packNumber, pickHistory);
+  const signalTrack = computeSignalTrack(packHistory, pickHistory, setMetrics, confidenceThreshold);
+  const readConfidence = signalConfidence(pos.pickNumber);
   const hasColorData = Object.values(colorSignals).some(s => s.hasData);
 
   const composition = computeDeckComposition(pickHistory);
@@ -1514,6 +1607,8 @@ function analyze(trackerState, packCards, position, settings) {
     const pack2 = pack2Insight(leftSideTakes(packHistory, pickHistory, setMetrics));
     if (pack2) signalInsights.unshift(pack2);
   }
+  const pivot2 = pivotWatch(packHistory, setMetrics, pos);
+  if (pivot2) signalInsights.unshift(pivot2);
   const bots = botBiasInsight(setMetrics?.bots);
   // Most useful while choosing colors: first in pack 1, then at the end.
   if (bots) (pos.packNumber === 0 && picksMade < 8 ? signalInsights.unshift(bots) : signalInsights.push(bots));
@@ -1545,6 +1640,9 @@ function analyze(trackerState, packCards, position, settings) {
   return {
     colorSignals,
     hasColorData,
+    // Openness after every pack seen, and how far the current read can be trusted.
+    signalTrack,
+    readConfidence,
     deckComposition: composition,
     deckNeeds: deckNeeds.slice(0, 3),
     strengths,
@@ -1604,7 +1702,7 @@ module.exports = {
   computeSignalInsights, computeDeckGrade,
   analyze, emptyState, detectColors, scoreCard,
   // exported for tests
-  computeBotProfile, pairPickShift,
+  computeBotProfile, pairPickShift, computeSignalTrack, signalConfidence, pivotWatch,
   cardQuality, wheelInfo, colorCommitment, lateness, normCdf, pipsOf, WIN_RULE,
   setWeights, getWeights, setTuning,
 };

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import CardRow from '../../components/CardRow';
 import ColorFilter from '../../components/ColorFilter';
 import { arenaVisualSort, resolveBasicLandName } from '../../utils/arenaSort';
+import ColorTrack from './ColorTrack';
 
 // ── Sorting ───────────────────────────────────────────────────────────────────
 const GRADE_ORDER = ['A+','A','A-','B+','B','B-','C+','C','C-','D+','D','D-','F'];
@@ -453,6 +454,10 @@ export default function DraftPanel({ draftState, assistantState, settings, onSet
             <>
               <PicksPanel picks={recommendation.picks} />
               <SignalInsightsPanel insights={signalInsights} />
+              <div style={{ marginTop: 10 }}>
+                <ColorTrack compact track={assistantState?.signalTrack} colorSignals={assistantState?.colorSignals}
+                            confidence={assistantState?.readConfidence} packSize={assistantState?.packSize ?? 14} />
+              </div>
             </>
           ) : (
             <>

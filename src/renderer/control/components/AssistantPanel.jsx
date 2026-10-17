@@ -1,4 +1,5 @@
 import React from 'react';
+import ColorTrack from './ColorTrack';
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
 const COLORS = ['W', 'U', 'B', 'R', 'G'];
@@ -11,48 +12,10 @@ const GRADE_COLORS = {
   'D+':'#e6823c','D':'#dc6e32','D-':'#d25a28','F':'#c83232',
 };
 
-function signalTrafficColor(score) {
-  if (score >= 60) return '#50c87a';
-  if (score >= 40) return '#c8c830';
-  return '#d05050';
-}
-
 function SectionHead({ title }) {
   return (
     <div style={{ fontSize: 9, fontWeight: 700, color: '#555', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8, paddingBottom: 3, borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
       {title}
-    </div>
-  );
-}
-
-// ── Color Signals ─────────────────────────────────────────────────────────────
-function ColorSignalsPanel({ colorSignals, hasColorData }) {
-  if (!colorSignals) return null;
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <SectionHead title="Color Signals" />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {COLORS.map(color => {
-          const sig = colorSignals[color];
-          if (!sig) return null;
-          const bar = sig.hasData ? sig.score : 50;
-          const col = sig.hasData ? signalTrafficColor(sig.score) : '#444';
-          return (
-            <div key={color}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                <span style={{ color: COLOR_HEX[color], fontWeight: 700, fontSize: 11, width: 14 }}>{color}</span>
-                <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.07)', borderRadius: 3, overflow: 'hidden' }}>
-                  <div style={{ width: `${bar}%`, height: '100%', background: col, borderRadius: 3, transition: 'width 0.4s' }} />
-                </div>
-                <span style={{ fontSize: 10, color: col, minWidth: 72, textAlign: 'right' }}>
-                  {sig.hasData ? `${sig.label} (${sig.score})` : 'No data yet'}
-                </span>
-              </div>
-              <div style={{ fontSize: 9, color: '#555', paddingLeft: 20, marginBottom: 2 }}>{sig.evidence}</div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -265,12 +228,12 @@ export default function AssistantPanel({ assistantState, draftState }) {
   const {
     colorSignals, hasColorData, deckComposition, deckNeeds, strengths, weaknesses,
     manaAnalysis, pickHistory, archetype, winConditions, deckGrade,
-    archetypeStandings, commitment,
+    archetypeStandings, commitment, signalTrack, readConfidence, packSize,
   } = assistantState;
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}>
-      <ColorSignalsPanel colorSignals={colorSignals} hasColorData={hasColorData} />
+      <ColorTrack track={signalTrack} colorSignals={colorSignals} confidence={readConfidence} packSize={packSize ?? 14} />
       <ArchetypeStandingsPanel standings={archetypeStandings} commitment={commitment} />
       <ArchetypeWinPanel archetype={archetype} winConditions={winConditions} deckGrade={deckGrade} />
       <DeckOverviewPanel composition={deckComposition} manaAnalysis={manaAnalysis} />
