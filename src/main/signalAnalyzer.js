@@ -1009,6 +1009,111 @@ function communityNote(card) {
   return ata != null ? `17Lands drafters take it ~pick ${ata.toFixed(1)}` : null;
 }
 
+// ─── Synergy lane ─────────────────────────────────────────────────────────────
+// Some cards look mediocre in 17Lands' overall win rate because they shine in
+// one archetype or in skilled hands (modes, flexibility, synergy). This lane
+// surfaces them as a recommendation — never in the base ranking — when the
+// lane they belong to looks open. Evidence, strongest first:
+//   archetype — GIH WR inside one color pair clearly above the card's overall
+//               GIH (17Lands public data, per-pair, shrunk; full set tables)
+//   experts   — top 17Lands drafters take it earlier than its win rate
+//               predicts (pick-model desirability vs GIH z)
+//   pool      — an explicit rules-text combo with your picks (synergyDetector)
+const SYNERGY = {
+  upliftPts: 2.5,     // archetype GIH above overall, in win-rate points (the standouts)
+  minPairGames: 200,  // drawn games in that pair before trusting it
+  expertResid: 1.0,   // pick-model desirability above its GIH, in SDs
+  maxZ: 0.67,         // only cards graded B or lower: strong cards are recommended anyway
+  openScore: 55,      // a lane's colors read at least this open…
+  laneProb: 0.15,     // …or it's this likely to be your deck already
+};
+
+/**
+ * Per card: how much more top drafters want it than its GIH z predicts, in
+ * SDs of the residual (b ≈ α + β·z over the set). Memoized per set metrics.
+ */
+function expertResiduals(table, setMetrics) {
+  const m = table?.model;
+  if (!m?.ids || !table.modelIndex || !setMetrics?.cards) return null;
+  if (setMetrics._expert?.table === table) return setMetrics._expert.map;
+  const zById = new Map(setMetrics.cards.filter((c) => c.mtgaId != null).map((c) => [c.mtgaId, cardZ(c, setMetrics)]));
+  const pts = [];
+  m.ids.forEach((id, i) => { const z = zById.get(id); if (z != null) pts.push([z, m.b[i], id]); });
+  const map = new Map();
+  if (pts.length >= 30) {
+    const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length, my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    let sxy = 0, sxx = 0;
+    for (const [x, y] of pts) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; }
+    const beta = sxx ? sxy / sxx : 0;
+    const res = pts.map(([x, y, id]) => [id, y - (my + beta * (x - mx))]);
+    const sd = Math.sqrt(res.reduce((s, [, r]) => s + r * r, 0) / res.length) || 1;
+    for (const [id, r] of res) map.set(id, r / sd);
+  }
+  setMetrics._expert = { table, map };
+  return map;
+}
+
+/** Is a two-color lane open? Your likeliest decks count; otherwise the color read. */
+function laneOpenness(pair, ctx) {
+  const p = ctx.win?.pairProbs?.[pair] ?? 0;
+  if (p >= SYNERGY.laneProb) return { open: true, why: p >= 0.5 ? `you're in ${pair}` : `${pair} is your backup` };
+  const sigs = [...pair].map((c) => ctx.colorSignals?.[c]).filter((s) => s?.hasData);
+  if (sigs.length < 2 || ctx.readConfidence?.level === 'too early') return { open: false };
+  const avg = sigs.reduce((s, x) => s + x.score, 0) / sigs.length;
+  return avg >= SYNERGY.openScore ? { open: true, why: `${pair} looks open (${Math.round(avg)}, ${ctx.readConfidence?.level} confidence)` } : { open: false };
+}
+
+/** Pairs a card can be played in (all of its colors). */
+const pairsFor = (card) => PAIRS.filter((p) => [...cardColorsOf(card)].every((c) => p.includes(c)));
+
+/**
+ * The best synergy-lane card in the pack (not already listed), with why —
+ * or null. Ranks evidence: archetype uplift > expert rating > pool synergy.
+ */
+function synergyPick(scored, ctx, listed) {
+  const table = ctx.setMetrics?.table;
+  const experts = expertResiduals(table, ctx.setMetrics);
+  let best = null;
+  for (const s of scored) {
+    const card = s.card;
+    if (listed.has(card.grpId) || isLandCard(card)) continue;
+    if ((cardZ(card, ctx.setMetrics) ?? -1) > SYNERGY.maxZ) continue;
+    const consider = (strength, pair, reason) => {
+      const lane = laneOpenness(pair, ctx);
+      if (!lane.open) return;
+      if (!best || strength > best.strength) best = { entry: s, strength, reason: `${reason} · ${lane.why}` };
+    };
+    // 1. Archetype uplift from the public data.
+    const overall = table?.cards?.[card.grpId]?.gih;
+    if (overall != null) {
+      for (const pair of pairsFor(card)) {
+        const pg = setDataLookups.pairGih(table, card.grpId, pair);
+        if (!pg || pg.shrunk || pg.n < SYNERGY.minPairGames) continue;
+        const up = (pg.gih - overall) * 100;
+        if (up >= SYNERGY.upliftPts) consider(3 + up, pair, `Synergy for ${pair}: GIH ${(pg.gih * 100).toFixed(1)}% in ${pair} decks vs ${(overall * 100).toFixed(1)}% overall`);
+      }
+    }
+    // 2. Top drafters rate it above its win rate.
+    const r = experts?.get(card.grpId);
+    if (r != null && r >= SYNERGY.expertResid) {
+      const pair = pairsFor(card).sort((a, b) => (ctx.win?.pairProbs?.[b] ?? 0) - (ctx.win?.pairProbs?.[a] ?? 0))[0];
+      if (pair) consider(2 + r, pair, `Top drafters rate it above its ${gihLabel(card)} — often flexible or a synergy piece`);
+    }
+    // 3. Rules-text synergy with your pool.
+    // (The detector's reasons line up with its themes, so show the one that qualified.)
+    const syn = ctx.synergyByGrpId?.get(card.grpId);
+    // Only explicit combos: broad themes ("spells matter", tribes) match most
+    // pools and drowned the lane in noise on a real draft.
+    const qualifying = (syn?.themes ?? []).findIndex((t) => t.startsWith('combo:'));
+    const why = qualifying >= 0 ? syn.allReasons?.[qualifying] : null;
+    if (why) {
+      const pair = pairsFor(card).sort((a, b) => (ctx.win?.pairProbs?.[b] ?? 0) - (ctx.win?.pairProbs?.[a] ?? 0))[0];
+      if (pair) consider(1 + syn.score, pair, `Synergy with your pool: ${why}`);
+    }
+  }
+  return best;
+}
+
 // ─── Pick options with the win model ──────────────────────────────────────────
 
 const MAX_OPTIONS = 5;
@@ -1064,7 +1169,16 @@ function buildWinOptions(scored, ctx) {
   const second = scored.find((s) => s !== top && winOf(s) >= NOTHING_HELPS_PP);
   if (second && !nothing) add('alt', second, 'Next best for your deck');
 
-  // 3. Strongest card by 17Lands GIH WR, if that's a different card.
+  // 3. Synergy lane: a card its win rate undersells, if its lane is open.
+  // Already listed (e.g. as next best) → add the synergy note to that line.
+  const syn = synergyPick(scored, ctx, new Set());
+  if (syn && listed.has(syn.entry.card.grpId)) {
+    const o = options.find((x) => x.card.grpId === syn.entry.card.grpId);
+    o.reason = o.reasonLong = `${o.reason} · ${syn.reason}`;
+    o.synergy = true;
+  } else if (syn) add('synergy', syn.entry, syn.reason);
+
+  // 3b. Strongest card by 17Lands GIH WR, if that's a different card.
   const byGih = scored.filter((s) => cardZ(s.card, ctx.setMetrics) != null)
     .sort((a, b) => (cardZ(b.card, ctx.setMetrics) ?? -9) - (cardZ(a.card, ctx.setMetrics) ?? -9))[0];
   if (byGih && byGih.card.grpId !== top.card.grpId) {
@@ -1256,6 +1370,8 @@ function computeRecommendation(packCards, ctx, tier3) {
   const secondary = scored.length > 1 && (scored[0].total - scored[1].total) < ctx.closeMargin
     ? scored[1].card : null;
 
+  ctx.synergyByGrpId = synergyByGrpId;
+  ctx.synergyThemes = tier3?.themes ?? null;
   const picks = win ? buildWinOptions(scored, ctx) : buildPickOptions(scored, ctx);
 
   // Attach synergy notes to pick reasons so the UI can show them inline.
@@ -1373,7 +1489,8 @@ function priorValueTable(setMetrics, packSize) {
   const cards = setMetrics.cards.filter((c) => c.mtgaId != null).map((c) => ({
     mtgaId: c.mtgaId, color: c.color, typeLine: c.typeLine, cmc: c.cmc, oracleText: c.oracleText, z: cardZ(c, setMetrics),
   }));
-  // setMetrics.valuePrior: research override (a prior that leaves the set out).
+  // setMetrics.valuePrior: the newest published prior (setData.loadValuePrior),
+  // or a research override (a prior that leaves the set out).
   const value = valuePrior.buildPriorValue(setMetrics.valuePrior ?? VALUE_PRIOR, cards, pairWr, size);
   const vt = value
     ? winValue.prepareValue({ cards: Object.fromEntries(cards.map((c) => [c.mtgaId, { color: c.color, types: [c.typeLine ?? ''] }])), value })
@@ -1622,12 +1739,13 @@ function analyze(trackerState, packCards, position, settings) {
     pickedCards: pickHistory, colorSignals, deckNeeds: deckNeeds.slice(0, 3),
     pos, draftStyle, setMetrics, commit,
     deckNeedsSetting: settings?.deckNeeds ?? 'normal',
+    readConfidence,
   };
   const wheelReport = computeWheelReport(packHistory, pickHistory, pos);
 
   const recommendation = (packCards && packCards.length > 0)
     ? computeRecommendation(packCards, ctx,
-        { synergies: synergyResult.synergies, archetype: archetypeResult, winConditions: winConditionResult })
+        { synergies: synergyResult.synergies, themes: synergyResult.themes, archetype: archetypeResult, winConditions: winConditionResult })
     : null;
 
   // Which archetypes the field is winning with, for the UI.

@@ -98,6 +98,7 @@ const PICK_KIND_META = {
   strongest: { icon: '⚡', color: '#ffce5c', label: 'Strongest',     bg: 'rgba(255,206,92,0.10)', border: 'rgba(255,206,92,0.32)' },
   removal:   { icon: '✕', color: '#ff8a7a', label: 'Removal',       bg: 'rgba(255,138,122,0.10)', border: 'rgba(255,138,122,0.32)' },
   backup:    { icon: '↪', color: '#8fb8ff', label: 'Backup',        bg: 'rgba(143,184,255,0.10)', border: 'rgba(143,184,255,0.32)' },
+  synergy:   { icon: '⚭', color: '#5fd3c8', label: 'Synergy',       bg: 'rgba(95,211,200,0.10)', border: 'rgba(95,211,200,0.32)' },
   splash:    { icon: '◆', color: '#d6a2ff', label: 'Splash',        bg: 'rgba(214,162,255,0.10)', border: 'rgba(214,162,255,0.32)' },
   alt:       { icon: '·', color: '#aaa',    label: 'Also good',     bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.14)' },
 };
@@ -122,6 +123,9 @@ function PickOptionCard({ pick }) {
           <span style={{ fontSize: 10, color: meta.color, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
             {meta.label}
           </span>
+          {pick.synergy && pick.kind !== 'synergy' && (
+            <span style={{ fontSize: 12, color: PICK_KIND_META.synergy.color }} title="Also a synergy-lane pick">⚭</span>
+          )}
           <span style={{ fontSize: 14, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {card?.name ?? `#${card?.grpId ?? '?'}`}
           </span>

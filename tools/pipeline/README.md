@@ -76,7 +76,21 @@ behavior — committing to a pair, filling creature / two-drop / removal gaps, a
 ```sh
 node --max-old-space-size=12000 tools/pipeline/newset-research.js HOB          # old vs prior vs table
 node --max-old-space-size=12000 tools/pipeline/newset-research.js HOB --tilt   # ablations
+node --max-old-space-size=12000 tools/pipeline/newset-research.js HOB --vacuum # vs best card in a vacuum
 ```
+
+`--vacuum` judges the pool-aware rule against picking the best card alone (top GIH, or top GIH
+in your top two colors). Taking the table's pick where they disagree: +0.08 / +0.07 / +0.19pp
+match win per pick vs top GIH and +0.16 / +0.08 / +0.07 vs top GIH in colors (HOB / SOS / ECL),
+positive in all six, each |t| < 2. The prior alone is about even with them (mixed signs).
+
+## Synergy lane (recommendations only)
+
+Cards that 17Lands' overall win rate undersells get their own recommendation, never a change to
+the base ranking, when the lane they belong to is open (one of your likely pairs, or both
+colors reading open with at least some confidence). Evidence: GIH WR inside one color pair at
+least 2.5 points above overall (200+ games, full tables), top drafters taking it well above its
+win rate (pick-model residual ≥ 1 SD), or an explicit combo with your pool.
 
 ## Opponent read (in game)
 
@@ -139,7 +153,8 @@ then copy the printed weights into `WEIGHTS_MODEL` / `WEIGHTS_BASE` in `signalAn
 
 `.github/workflows/set-data.yml` runs daily: `update-sets.js` checks the 8 newest expansions,
 compares 17Lands' dataset dates with the published tables, rebuilds what's new or changed and
-publishes. Run it by hand from the Actions tab (optionally with set codes / force), or locally:
+publishes. Whenever a table changes it also rebuilds the cross-set prior and publishes it as
+`valuePrior.json`, which the app downloads daily (the bundled copy is the fallback). Run it by hand from the Actions tab (optionally with set codes / force), or locally:
 
 ```sh
 node tools/pipeline/update-sets.js --dry-run      # what would change

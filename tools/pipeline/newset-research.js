@@ -30,6 +30,7 @@ function parseArgs(argv) {
     if (argv[i] === '--limit') a.limit = Number(argv[++i]);
     else if (argv[i] === '--strong') a.settings.deckNeeds = 'strong';
     else if (argv[i] === '--tilt') a.tilt = true;
+    else if (argv[i] === '--vacuum') a.vacuum = true;
     else if (!a.set) a.set = argv[i].toUpperCase();
   }
   return a;
@@ -69,13 +70,32 @@ async function main() {
   // Three views of the set: no win model / prior win model / real table.
   const base = { ...ctx.metrics };
   // --tilt: the table rule with the fading top-player tilt vs a flat one.
+  // --vacuum: the rules against "best card in a vacuum" (highest 17Lands GIH
+  // z in the pack, or in your two most-picked colors), which don't use the analyzer.
   const variants = args.tilt
     ? { table: { ...base }, flat: { ...base }, nosplash: { ...base }, before: { ...base } }
+    : args.vacuum
+    ? { table: { ...base }, prior: { ...base, table: null, valuePrior: prior }, gih: null, gihColors: null }
     : { old: { ...base, table: null, cards: undefined }, prior: { ...base, table: null, valuePrior: prior }, table: { ...base } };
+  const z = (c) => sa.cardQuality ? (c?.stats?.z ?? -9) : -9;
+  const topColors = (picks) => {
+    const n = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+    for (const c of picks) for (const ch of String(c.color ?? '').replace(/[^WUBRG]/g, '')) n[ch]++;
+    return Object.keys(n).sort((a, b) => n[b] - n[a]).slice(0, 2);
+  };
+  const vacuum = {
+    gih: (pack) => pack.reduce((b, c) => (z(c) > z(b) ? c : b)).grpId,
+    gihColors: (pack, picks) => {
+      const top = topColors(picks);
+      const fits = (c) => [...String(c.color ?? '').replace(/[^WUBRG]/g, '')].every((ch) => top.includes(ch));
+      const inColor = picks.length >= 6 ? pack.filter(fits) : pack;
+      return (inColor.length ? inColor : pack).reduce((b, c) => (z(c) > z(b) ? c : b)).grpId;
+    },
+  };
   // before = the rule as validated earlier (flat tilt, no splash).
   const ruleFor = { flat: { tiltByStage: [1, 1, 1, 1] }, nosplash: { splash: false }, before: { tiltByStage: [1, 1, 1, 1], splash: false } };
   const names = Object.keys(variants);
-  const pairsToCompare = args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
+  const pairsToCompare = args.vacuum ? [['table', 'gih'], ['table', 'gihColors'], ['prior', 'gih'], ['prior', 'gihColors']] : args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
 
   const rows = [];
   const agree = Object.fromEntries(names.map((k) => [k, [0, 0]]));
@@ -102,9 +122,12 @@ async function main() {
           for (const k of names) {
             const saved = ruleFor[k] ? Object.fromEntries(Object.keys(ruleFor[k]).map((x) => [x, sa.WIN_RULE[x]])) : null;
             if (saved) Object.assign(sa.WIN_RULE, ruleFor[k]);
-            const a = sa.analyze({ ...ts, setMetrics: variants[k] }, pack, { packNumber, pickNumber, packSize }, args.settings);
+            if (vacuum[k] && !variants[k]) rec[k] = vacuum[k](pack, ts.pickHistory);
+            else {
+              const a = sa.analyze({ ...ts, setMetrics: variants[k] }, pack, { packNumber, pickNumber, packSize }, args.settings);
+              rec[k] = a.recommendation?.primary?.grpId ?? null;
+            }
             if (saved) Object.assign(sa.WIN_RULE, saved);
-            rec[k] = a.recommendation?.primary?.grpId ?? null;
             agree[k][0] += rec[k] === pk.taken ? 1 : 0; agree[k][1]++;
           }
           for (const [a, b] of pairsToCompare) {

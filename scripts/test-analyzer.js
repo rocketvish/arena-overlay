@@ -366,6 +366,21 @@ test('a new set without a table gets a win model from the cross-set prior', () =
   assert.ok(value.pairBias[0] > value.pairBias[1], 'stronger pair → bigger archetype term');
 });
 
+test('synergy lane: an archetype standout is recommended when its lane is open', () => {
+  const t = winTable();
+  // U Spell plays much better in WU than overall (17Lands per-pair GIH).
+  t.cards[104] = { ...t.cards[104], gih: 0.54, pairs: { WU: [0.60, 900] } };
+  t.cards[102] = { ...t.cards[102], gih: 0.56 };
+  const metricsWin = { ...metrics, table: t };
+  const mk = (id, z) => ({ grpId: id, name: t.cards[id].name, color: t.cards[id].color, typeLine: t.cards[id].types.join(' '), stats: { z, grade: 'C' } });
+  const pool = Array(10).fill(0).map((_, i) => ({ ...mk(i % 2 ? 101 : 103, 0), packNumber: 0, pickNumber: i }));
+  const a = sa.analyze({ packHistory: [], pickHistory: pool, setMetrics: metricsWin, packSize: 14 }, [mk(102, 0.5), mk(104, -0.3)], { packNumber: 0, pickNumber: 10, packSize: 14 }, {});
+  const syn = a.recommendation.picks.find((p) => p.kind === 'synergy' || p.synergy);
+  assert.ok(syn, JSON.stringify(a.recommendation.picks.map((p) => [p.kind, p.card.name])));
+  assert.strictEqual(syn.card.grpId, 104);
+  assert.match(syn.reason, /Synergy for WU/);
+});
+
 console.log('\nPack 2 forecast');
 
 test("what the left side took in pack 1 counts against that color in pack 2", () => {
