@@ -218,6 +218,10 @@ function computeGrades(rawCards) {
     : null;
   const shrinkGih = (c) => (gihTau2 == null ? c.ever_drawn_win_rate
     : gih.mean + (gihTau2 / (gihTau2 + gihNoise(c))) * (c.ever_drawn_win_rate - gih.mean));
+  // z on the true spread of card quality (observed spread minus sampling
+  // noise): dividing shrunk values by the noise-inflated observed spread
+  // would compress well-sampled cards too, a second shrink.
+  const zScale = gihTau2 == null ? gih.std : Math.sqrt(gihTau2);
 
   const none = () => rawCards.map(() => ({ grade: null, z: null, gihwrEst: null, gradeEstimated: false, lowSample: true }));
 
@@ -262,7 +266,7 @@ function computeGrades(rawCards) {
   return rawCards.map((c) => {
     if (gihOk(c)) {
       const shrunk = shrinkGih(c);
-      const z = (shrunk - gih.mean) / gih.std;
+      const z = (shrunk - gih.mean) / zScale;
       return { grade: calcGrade(z), z, gihwrEst: null, gihwrShrunk: shrunk, gradeEstimated: false, lowSample: false };
     }
     const n = c.game_count ?? 0;
@@ -271,7 +275,7 @@ function computeGrades(rawCards) {
       const noise = (p * (1 - p)) / n;
       const shrunk = gpMean + (tau2 / (tau2 + noise)) * (p - gpMean);
       const est = a + b * shrunk;
-      const z = (est - gih.mean) / gih.std;
+      const z = (est - gih.mean) / zScale;
       return { grade: calcGrade(z), z, gihwrEst: est, gradeEstimated: true, lowSample: true };
     }
     return { grade: null, z: null, gihwrEst: null, gradeEstimated: false, lowSample: true };
