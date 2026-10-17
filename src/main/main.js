@@ -45,6 +45,7 @@ const SETTING_VALIDATORS = {
   'assistant.confidenceThreshold': (v) => Number.isInteger(v) && v >= 1 && v <= 10,
   'assistant.draftStyle': (v) => ['best-card', 'balanced', 'signals'].includes(v),
   'assistant.gameAssistant': (v) => typeof v === 'boolean',
+  'assistant.deckNeeds': (v) => ['normal', 'strong'].includes(v),
   'display.showRecommendation': (v) => typeof v === 'boolean',
   'display.compactMode': (v) => typeof v === 'boolean',
   'display.packSort': (v) => ['arena', 'win', 'grade', 'gihwr', 'ohwr', 'color', 'name'].includes(v),

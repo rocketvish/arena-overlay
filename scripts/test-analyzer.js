@@ -308,6 +308,54 @@ test('analyzer ranks by the win rule when the set table has a value block', () =
   assert.match(a.recommendation.picks[0].reason, /deck win rate/);
 });
 
+console.log('\nSplash, fixing, new sets');
+
+test('a strong one-pip off-color card counts as a splash; a mediocre one does not', () => {
+  const t = winTable();
+  const pool = Array(16).fill(0).map((_, i) => (i % 2 ? 101 : 104)); // W creatures + U spells
+  const info = new Map([
+    [105, { colors: 'R', pips: { R: 1 }, z: 1.5, land: false, fixes: '' }],  // strong, one pip
+  ]);
+  const withSplash = setData.winScores(t, pool, [105], 30, { tau: 0.05, info });
+  const without = setData.winScores(t, pool, [105], 30, { tau: 0.05 });
+  assert.ok(withSplash.scores.get(105) > without.scores.get(105) + 1e-6, `${withSplash.scores.get(105)} vs ${without.scores.get(105)}`);
+  const weak = new Map([[105, { colors: 'R', pips: { R: 1 }, z: 0.2, land: false, fixes: '' }]]);
+  const w = setData.winScores(t, pool, [105], 30, { tau: 0.05, info: weak });
+  assert.ok(Math.abs(w.scores.get(105) - without.scores.get(105)) < 1e-9, 'below B+ → no splash');
+  const twoPips = new Map([[105, { colors: 'R', pips: { R: 2 }, z: 1.5, land: false, fixes: '' }]]);
+  const tp = setData.winScores(t, pool, [105], 30, { tau: 0.05, info: twoPips });
+  assert.ok(Math.abs(tp.scores.get(105) - without.scores.get(105)) < 1e-9, 'two off-color pips → no splash');
+});
+
+test('fixing for the splash color gains value only once there is a splash', () => {
+  const t = winTable();
+  const base = Array(16).fill(0).map((_, i) => (i % 2 ? 101 : 104));
+  const info = new Map([
+    [105, { colors: 'R', pips: { R: 1 }, z: 1.5, land: false, fixes: '' }],
+    [106, { colors: '', pips: {}, z: 0, land: true, fixes: 'WR' }],
+  ]);
+  const splashing = setData.winScores(t, [...base, 105], [106], 30, { tau: 0.05, info });
+  const notSplashing = setData.winScores(t, base, [106], 30, { tau: 0.05, info });
+  assert.ok(splashing.scores.get(106) > 1e-6, `dual land with a splash: ${splashing.scores.get(106)}`);
+  assert.ok(Math.abs(notSplashing.scores.get(106)) < 1e-9, `dual land without a splash: ${notSplashing.scores.get(106)}`);
+});
+
+test('a new set without a table gets a win model from the cross-set prior', () => {
+  const vp = require('../src/main/valuePrior');
+  const prior = require('../src/main/valuePrior.json');
+  const cards = [
+    { mtgaId: 1, color: 'W', typeLine: 'Creature — Bear', cmc: 2, oracleText: '', z: 1 },
+    { mtgaId: 2, color: 'U', typeLine: 'Instant', cmc: 2, oracleText: 'Destroy target creature.', z: 0 },
+  ];
+  const value = vp.buildPriorValue(prior, cards, { WU: 0.56, WB: 0.54 }, 13);
+  assert.strictEqual(value.phantom.WU.value.length, 39, 'resampled to 13-card packs');
+  assert.ok(value.w[0] > value.w[1], 'better grade → more value');
+  assert.strictEqual(value.traits[0] & 1, 1); assert.strictEqual(value.traits[1] & 4, 4);
+  const vt = wv.prepareValue({ cards: { 1: { color: 'W', types: ['Creature'] }, 2: { color: 'U', types: ['Instant'] } }, value });
+  assert.ok(vt, 'loads like a published value block');
+  assert.ok(value.pairBias[0] > value.pairBias[1], 'stronger pair → bigger archetype term');
+});
+
 console.log('\nPack 2 forecast');
 
 test("what the left side took in pack 1 counts against that color in pack 2", () => {

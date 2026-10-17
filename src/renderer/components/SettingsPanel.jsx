@@ -157,6 +157,13 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           value={assistant.confidenceThreshold ?? 4}
           min={1} max={10} step={1}
           onChange={(v) => onSet('assistant.confidenceThreshold', v)} />
+        <Select label="Deck needs"
+          value={assistant.deckNeeds ?? 'normal'}
+          options={[
+            { value: 'normal', label: 'Normal (as measured in 17Lands games)' },
+            { value: 'strong', label: 'Strong (push creatures, two-drops, removal harder)' },
+          ]}
+          onChange={(v) => onSet('assistant.deckNeeds', v)} />
         <Select label="Draft style preference"
           value={assistant.draftStyle ?? 'balanced'}
           options={[

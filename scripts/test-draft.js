@@ -203,6 +203,16 @@ function printPackReport(packEvents, landsMap, trackerState, assistantSettings, 
     const anal  = signalAnalyzer.analyze(ts, enriched, { packNumber, pickNumber, packSize: packEvent.data.packSize }, assistantSettings);
     const rec   = anal.recommendation;
 
+    // DRAFT_DEBUG=1: why the win rule ranked the pack the way it did.
+    if (process.env.DRAFT_DEBUG && rec?.win) {
+      const w = rec.win;
+      const needs = Object.entries(w.needs ?? {}).map(([k, v]) => `${k} ${v.count}${v.gainPct > 0.05 ? ` (+${v.gainPct.toFixed(2)}pp for one more)` : ''}`).join(', ');
+      console.log(`  ${dim(`deck: ${w.pair?.pair ?? '?'} ${Math.round((w.pair?.p ?? 0) * 100)}%${w.splash ? ` splash ${w.splash}` : ''} · ${needs}`)}`);
+      for (const r of (rec.ranking ?? []).slice(0, 5)) {
+        console.log(`  ${dim(`  ${String(r.score).padStart(7)}  win ${String(r.parts.win ?? '—').padStart(5)}pp  ${r.name}`)}`);
+      }
+    }
+
     // Print card table
     const noMatch   = [];
     const noStats   = [];

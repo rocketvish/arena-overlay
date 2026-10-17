@@ -115,14 +115,18 @@ function shapeValue(vt, counts) {
     for (const [k, w] of s.short) if (counts[j] < k) total += w * (k - counts[j]);
     for (const [k, w] of s.over) if (counts[j] > k) total += w * (counts[j] - k);
   }
-  return total;
+  // "Deck needs: strong" scales the learned shape costs up (see scorePack).
+  return total * (vt.shapeScale ?? 1);
 }
 
 /** Deck slots for pair p: castable pool cards, then expected future picks. */
-function deckUnits(vt, pool, p, nextPick, shift = 0) {
+function deckUnits(vt, pool, p, nextPick, shift = 0, splash = null) {
   const bit = 1 << p;
   const units = [];
-  for (const c of pool) if (c.mask & bit) units.push({ w: c.w, a: c.a });
+  for (const c of pool) {
+    if (c.mask & bit) units.push({ w: c.w, a: c.a });
+    else if (splash && c.splash?.[p] === splash.color) units.push({ w: c.w * splash.eff, a: c.a, splash: true });
+  }
   const ph = vt.phantom[p];
   const packSize = vt.picks / 3;
   let mass = 0, k = 0;
@@ -204,24 +208,75 @@ function withCard(vt, deck, c) {
   return best;
 }
 
-function poolCards(vt, poolIds) {
+// ─── Splash and fixing ────────────────────────────────────────────────────────
+// Each pair is also tried with one splash color: an off-color card counts if
+// it's strong (17Lands z ≥ minZ, about B+) and needs at most one pip of it.
+// It plays at a discount (inconsistent mana) that each land or mana rock
+// making the splash color shrinks — that's what fixing is worth, and only
+// once there's something to splash. A splash also costs the deck a little.
+const SPLASH = { minZ: 1.0, maxPips: 1, base: 0.55, perFix: 0.12, maxFix: 3, deckCost: 0.01 };
+const COLOR_LIST = ['W', 'U', 'B', 'R', 'G'];
+
+/** Per pair: the off color this card could be splashed as, or null. */
+function splashColors(info) {
+  if (!info || info.land || !(info.z >= SPLASH.minZ)) return null;
+  const cs = String(info.colors ?? '').replace(/[^WUBRG]/g, '');
+  return PAIRS.map((p) => {
+    const off = [...cs].filter((c) => !p.includes(c));
+    if (off.length !== 1) return null;
+    return (info.pips?.[off[0]] ?? 1) <= SPLASH.maxPips ? off[0] : null;
+  });
+}
+
+const splashEff = (fixers) => SPLASH.base + SPLASH.perFix * Math.min(fixers, SPLASH.maxFix);
+
+/**
+ * Pool cards with what the scorer knows about them; `info` (grpId →
+ * { colors, pips, z, land, fixes }) adds splash and fixing facts when given.
+ */
+function poolCards(vt, poolIds, info = null) {
   const pool = [];
   for (const id of poolIds) {
     const c = vt.cards.get(id);
-    if (c) pool.push(c);
+    if (!c) continue;
+    const i = info?.get(id);
+    pool.push(i ? { ...c, splash: splashColors(i), fixes: i.fixes ?? '' } : c);
   }
   return pool;
 }
 
-/** Projected decks per pair, from `nextPick` on. */
-function projectDecks(vt, poolIds, nextPick, pickShift = null) {
-  const pool = poolCards(vt, poolIds);
-  return PAIRS.map((_, p) => buildDeck(vt, deckUnits(vt, pool, p, nextPick, pickShift?.[p] ?? 0)));
+/** Variants of pair p's deck: no splash, and one per off color. */
+function pairVariants(vt, pool, p, nextPick, shift, withSplash) {
+  const variants = [];
+  const plain = buildDeck(vt, deckUnits(vt, pool, p, nextPick, shift));
+  variants.push({ color: null, eff: 0, fixers: 0, deck: plain, value: plain.value, splashing: false });
+  if (!withSplash) return variants;
+  for (const color of COLOR_LIST) {
+    if (PAIRS[p].includes(color)) continue;
+    const fixers = pool.filter((c) => c.fixes?.includes(color)).length;
+    const eff = splashEff(fixers);
+    const deck = buildDeck(vt, deckUnits(vt, pool, p, nextPick, shift, { color, eff }));
+    const splashing = deck.sel.some((u) => u.splash);
+    variants.push({ color, eff, fixers, deck, value: deck.value - (splashing ? SPLASH.deckCost : 0), splashing });
+  }
+  return variants;
+}
+
+const bestVariant = (vs) => vs.reduce((a, b) => (b.value > a.value ? b : a));
+
+/** Projected decks per pair (each with its best splash variant), from `nextPick` on. */
+function projectDecks(vt, poolIds, nextPick, pickShift = null, info = null) {
+  const pool = poolCards(vt, poolIds, info);
+  return PAIRS.map((_, p) => {
+    const variants = pairVariants(vt, pool, p, nextPick, pickShift?.[p] ?? 0, !!info);
+    const best = bestVariant(variants);
+    return { ...best.deck, value: best.value, variants, pool, splash: best.splashing ? best.color : null };
+  });
 }
 
 /** Projected deck value for each pair (archetype effect included). */
-function pairValues(vt, poolIds, nextPick) {
-  return Float64Array.from(projectDecks(vt, poolIds, nextPick), (d, p) => d.value + vt.pairBias[p]);
+function pairValues(vt, poolIds, nextPick, opts = {}) {
+  return Float64Array.from(projectDecks(vt, poolIds, nextPick, opts.pickShift, opts.info), (d, p) => d.value + vt.pairBias[p]);
 }
 
 function softMax(values, tau) {
@@ -233,29 +288,61 @@ function softMax(values, tau) {
 }
 
 /**
+ * Pair p's value with card c added: the best of its variants, where c plays
+ * normally (castable), as a splash (that variant's color), or as fixing
+ * (rebuild that splash variant with one more source).
+ */
+function pairWithCard(vt, d, p, c, ci, nextPick, shift) {
+  let best = { value: d.value, shapeGain: 0 };
+  const splashAs = ci ? splashColors(ci)?.[p] : null;
+  for (const v of d.variants) {
+    let r = null;
+    if (c.mask & (1 << p)) {
+      r = withCard(vt, v.deck, c);
+      r = { ...r, value: r.value - (v.splashing ? SPLASH.deckCost : 0) };
+    } else if (v.color && splashAs === v.color) {
+      r = withCard(vt, v.deck, { w: c.w * v.eff, a: c.a });
+      r = { ...r, value: r.value - SPLASH.deckCost };
+    } else if (v.color && v.splashing && ci?.fixes?.includes(v.color) && v.fixers < SPLASH.maxFix) {
+      const deck = buildDeck(vt, deckUnits(vt, d.pool, p, nextPick, shift, { color: v.color, eff: splashEff(v.fixers + 1) }));
+      r = { value: deck.value - SPLASH.deckCost, shapeGain: 0 };
+    }
+    if (r && r.value > best.value) best = r;
+  }
+  return best;
+}
+
+/**
  * Score every card in the pack. `pickIndex` is the 0-based pick across the
  * whole draft (pack * packSize + pick). Returns null without a value table,
  * else { scores: Map(grpId → Δ log-odds), shape: Map(grpId → part of Δ from
- * deck shape in your likeliest pair), pairProbs: {WU: p, …}, best, needs }.
- * `pickShift` (per pair, in picks): see deckUnits — Quick Draft bot bias.
+ * deck shape in your likeliest pair), pairProbs: {WU: p, …}, best, needs,
+ * topPair, splash: the likeliest deck's splash color or null }.
+ * Options: `pickShift` (per pair, in picks; see deckUnits — Quick Draft bot
+ * bias), `info` (grpId → card facts; enables splash and fixing),
+ * `shapeScale` (> 1 weighs deck needs more than the data says).
  */
-function scorePack(vt, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU, pickShift = null } = {}) {
-  if (!vt) return null;
-  const decks = projectDecks(vt, poolIds, pickIndex + 1, pickShift);
+function scorePack(vtIn, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU, pickShift = null, info = null, shapeScale = 1 } = {}) {
+  if (!vtIn) return null;
+  const vt = shapeScale !== 1 ? { ...vtIn, shapeScale } : vtIn;
+  const next = pickIndex + 1;
+  const decks = projectDecks(vt, poolIds, next, pickShift, info);
   const base = Float64Array.from(decks, (d, p) => d.value + vt.pairBias[p]);
   const baseSoft = softMax(base, tau);
   let top = 0;
   for (let p = 1; p < PAIRS.length; p++) if (base[p] > base[top]) top = p;
-  const scores = new Map(), shape = new Map();
+  // topGain: how much of a card's lift is in the likeliest pair (the rest
+  // is a hedge toward another pair).
+  const scores = new Map(), shape = new Map(), topGain = new Map();
   for (const id of new Set(packIds)) {
     const c = vt.cards.get(id);
     if (!c) continue;
+    const ci = info?.get(id) ?? null;
     const vals = Float64Array.from(base);
     for (let p = 0; p < PAIRS.length; p++) {
-      if (!(c.mask & (1 << p))) continue;
-      const r = withCard(vt, decks[p], c);
+      const r = pairWithCard(vt, decks[p], p, c, ci, next, pickShift?.[p] ?? 0);
       vals[p] = r.value + vt.pairBias[p];
-      if (p === top) shape.set(id, r.shapeGain);
+      if (p === top) { shape.set(id, r.shapeGain); topGain.set(id, r.value - decks[p].value); }
     }
     scores.set(id, softMax(vals, tau) - baseSoft);
   }
@@ -264,8 +351,8 @@ function scorePack(vt, poolIds, packIds, pickIndex, { tau = DEFAULT_TAU, pickShi
   const Z = ex.reduce((a, b) => a + b, 0);
   const pairProbs = Object.fromEntries(PAIRS.map((p, i) => [p, ex[i] / Z]));
   let best = null;
-  for (const [id, s] of scores) if (!best || s > best[1]) best = [id, s];
-  return { scores, shape, pairProbs, best: best[0], toPct: vt.toPct, needs: shapeNeeds(vt, decks[top]), topPair: PAIRS[top] };
+  for (const [id, sc] of scores) if (!best || sc > best[1]) best = [id, sc];
+  return { scores, shape, topGain, pairProbs, best: best[0], toPct: vt.toPct, needs: shapeNeeds(vt, decks[top]), topPair: PAIRS[top], splash: decks[top].splash };
 }
 
 /**
@@ -285,11 +372,11 @@ function shapeNeeds(vt, deck) {
 }
 
 /** Value of the best finished deck you could build from a pool (no future picks). */
-function poolValue(vt, poolIds) {
-  const v = pairValues(vt, poolIds, vt.picks);
+function poolValue(vt, poolIds, opts = {}) {
+  const v = pairValues(vt, poolIds, vt.picks, opts);
   let best = 0;
   for (let p = 1; p < PAIRS.length; p++) if (v[p] > v[best]) best = p;
   return { value: v[best], pair: PAIRS[best], byPair: v };
 }
 
-module.exports = { PAIRS, SHAPE, SPELLS, DEFAULT_TAU, castMask, cardMask, prepareValue, pairValues, scorePack, poolValue, shapeValue };
+module.exports = { PAIRS, SHAPE, SPELLS, DEFAULT_TAU, SPLASH, castMask, cardMask, prepareValue, pairValues, scorePack, poolValue, shapeValue, splashColors };

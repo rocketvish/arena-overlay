@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { normCardName } = require('./csv');
+const { cardTraits, fixingColors, TRAIT, TRAIT_LIST, REMOVAL_RE, isLandType } = require('../../src/main/cardTraits');
 
 const HEADERS = { 'User-Agent': 'ArenaOverlay-pipeline', Accept: 'application/json' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,6 +39,7 @@ async function loadCardList(set) {
 
 const scryfallEntry = (c) => ({
   cmc: c.cmc ?? null,
+  manaCost: c.mana_cost ?? c.card_faces?.[0]?.mana_cost ?? null,
   oracle: c.oracle_text ?? (c.card_faces ?? []).map((f) => f.oracle_text ?? '').join('\n'),
 });
 
@@ -69,26 +71,7 @@ async function scryfallByName(names) {
   return out;
 }
 
-// ─── Traits ───────────────────────────────────────────────────────────────────
-
-const TRAIT = { creature: 1, twoDrop: 2, removal: 4, topEnd: 8 };
-const TRAIT_LIST = [TRAIT.creature, TRAIT.twoDrop, TRAIT.removal, TRAIT.topEnd];
-// Same idea as deckBuilder.js's REMOVAL_RE.
-const REMOVAL_RE = /\b(destroy target|exile target|deal[s]? \d+ damage to (any target|target)|deals damage equal to .* to (any target|target)|gets? [-−]\d+\/[-−]\d+|[-−]\d+\/[-−]\d+ until|[-−]x\/[-−]x|fights? (another |up to one )?target|target creature .* fights|return[s]? target (creature|nonland permanent) to its owner's hand)/i;
-
-const isLandType = (types) => types.some((t) => /\bLand\b/.test(t)) && !types.some((t) => /\bCreature\b/.test(t));
-
-/** Trait bits for a card: { types, cmc, oracle } (Scryfall text may be missing). */
-function cardTraits({ types = [], cmc = null, oracle = '' }) {
-  if (isLandType(types)) return 0;
-  let t = 0;
-  const creature = types.some((x) => /\bCreature\b/.test(x));
-  if (creature) t |= TRAIT.creature;
-  if (creature && cmc != null && cmc <= 2) t |= TRAIT.twoDrop;
-  if (REMOVAL_RE.test(oracle ?? '')) t |= TRAIT.removal;
-  if (cmc != null && cmc >= 6) t |= TRAIT.topEnd;
-  return t;
-}
+// ─── Traits (shared with the app: src/main/cardTraits.js) ─────────────────────
 
 /**
  * The set's cards with traits, cached in `cache`. Returns { list, cards }:
@@ -96,7 +79,7 @@ function cardTraits({ types = [], cmc = null, oracle = '' }) {
  * keyed by normalized name.
  */
 async function cardTable(set, cache) {
-  const file = path.join(cache, `cards2.${set}.json`);
+  const file = path.join(cache, `cards3.${set}.json`);
   let list;
   if (fs.existsSync(file)) list = JSON.parse(fs.readFileSync(file, 'utf8'));
   else {
@@ -114,8 +97,10 @@ async function cardTable(set, cache) {
   const cards = new Map();
   list.forEach((m, idx) => cards.set(normCardName(m.name), {
     idx, mtgaId: m.mtgaId, name: m.name, color: m.color, types: m.types,
-    land: isLandType(m.types),
+    land: isLandType(m.types.join(' ')),
     traits: cardTraits({ types: m.types, cmc: m.cmc ?? null, oracle: m.oracle ?? '' }),
+    fixes: fixingColors({ types: m.types, oracle: m.oracle ?? '' }),
+    manaCost: m.manaCost ?? null,
   }));
   const withText = list.filter((m) => m.oracle != null).length;
   if (withText < list.length * 0.9) console.warn(`  only ${withText}/${list.length} cards have Scryfall text`);

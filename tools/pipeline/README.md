@@ -53,6 +53,31 @@ the left side. `pack2-research.js` checks whether that predicts what reaches you
 it does (HOB / SOS / ECL), about 1.4× as much per unit as the ordinary pack-1 signal, which
 the overlay now adds to its pack-2 color signals (`LEFT_TAKE_WEIGHT` in `signalAnalyzer.js`).
 
+## New sets (before public data)
+
+Public datasets arrive 2–3 weeks into a set. Until then the app builds the deck win model from
+a cross-set prior (`src/main/valuePrior.json`, from `build-prior.js` over the published tables):
+deck value per 17Lands GIH z (0.043–0.053 log-odds in every set), deck-shape costs, future-pick
+quality by pick, and an archetype term from live pair win rates. Re-run when sets are added:
+
+```sh
+gh release download set-data -R rocketvish/arena-overlay -p '*.json' -D <dir>
+node tools/pipeline/build-prior.js <dir>
+```
+
+The win rule also tries one splash color per pair (B+ or better, one off-color pip, at a discount
+that fixing for that color reduces) and fades the top-player tilt over the draft.
+`newset-research.js` replays held-out drafts pretending the set is new (prior from the other
+sets): against the old model-free scorer, and for the splash / tilt changes, the outcome
+differences were within noise on HOB / SOS / ECL (|t| ≤ 1.5, mixed signs). They were kept for
+behavior — committing to a pair, filling creature / two-drop / removal gaps, a splash threshold
+— not for a measured win-rate gain.
+
+```sh
+node --max-old-space-size=12000 tools/pipeline/newset-research.js HOB          # old vs prior vs table
+node --max-old-space-size=12000 tools/pipeline/newset-research.js HOB --tilt   # ablations
+```
+
 ## Opponent read (in game)
 
 Per card, the table stores how each two-color archetype runs it (`cards[id].deck[P]` =

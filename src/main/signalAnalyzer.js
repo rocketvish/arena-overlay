@@ -24,6 +24,10 @@ const archetypeDetector  = require('./analysis/archetypeDetector');
 const winConditionAnalyzer = require('./analysis/winConditionAnalyzer');
 // Lookups into the per-set tables derived from 17Lands' public datasets.
 const setDataLookups = require('./setData');
+const winValue = require('./winValue');
+const valuePrior = require('./valuePrior');
+const VALUE_PRIOR = require('./valuePrior.json');
+const cardTraits = require('./cardTraits');
 
 const COLORS = ['W', 'U', 'B', 'R', 'G'];
 const POD_SIZE = 8;                 // drafters per pod — a pack wheels after 8 picks
@@ -112,7 +116,8 @@ function computeSetMetrics(cards, colorRatings = null) {
     if (Object.keys(pairs).length === 0) pairs = null;
   }
 
-  return { meanGihwr, stdGihwr, qualityFractions, totalCards: cards.length, pairs };
+  // cards: the set list, for the win model built from the cross-set prior.
+  return { meanGihwr, stdGihwr, qualityFractions, totalCards: cards.length, pairs, cards };
 }
 
 /** z-score of a card's quality on the set's GIH scale, or null if unknown. */
@@ -934,14 +939,17 @@ function buildPickOptions(scored, ctx) {
     return p != null ? `top 17Lands drafters take it here ~${Math.round(p * 100)}% of the time` : null;
   };
   const winPart = safeEntry.parts.win;
-  const safeReason = winPart != null
-    ? [`${fmtWin(winPart)} deck win rate (${gradeLabel(safe)})`, shapeNote(safe, ctx)].filter(Boolean).join(', ')
+  const nothingHelps = winPart != null && winPart < NOTHING_HELPS_PP;
+  const safeReason = nothingHelps
+    ? `nothing here improves your deck — best card as a hedge (${gradeLabel(safe)})`
+    : winPart != null
+    ? [`${fmtWin(winPart)} deck win rate (${gradeLabel(safe)})`, hedgeNote(safe, ctx) ?? shapeNote(safe, ctx)].filter(Boolean).join(', ')
     : inColors
       ? `best for your ${ctx.commit.top.join('')} deck (${gradeLabel(safe)})`
       : `best overall pick (${gradeLabel(safe)})`;
   const isClear = upside && upside.grpId === safe.grpId;
   picks.push({
-    kind: isClear ? 'clear' : 'safe',
+    kind: isClear && !nothingHelps && !hedgeNote(safe, ctx) ? 'clear' : 'safe',
     card: safe,
     reason: topModel && topModel[0] === safe.grpId ? `${safeReason} · top players' pick` : safeReason,
     reasonLong: [safeReason, winPart != null && 'deck win rate from 17Lands game results, controlling for player skill', modelNote(safe), communityNote(safe)].filter(Boolean).join(' · '),
@@ -1001,9 +1009,21 @@ function computeRecommendation(packCards, ctx, tier3) {
   if (table) {
     ctx.modelScores = setDataLookups.modelScores(table, poolIds, packIds);
     ctx.modelMax = ctx.modelScores ? Math.max(...ctx.modelScores.values()) : 0;
-    ctx.win = ctx.modelScores ? setDataLookups.winScores(table, poolIds, packIds, ctx.pos.overall, { tau: WIN_RULE.tau, pickShift: pairPickShift(ctx.setMetrics?.bots) }) : null;
   }
+  // The set's own deck win model, or (before its public data exists) one
+  // built from the cross-set prior and live 17Lands grades.
+  const vt = table?.valueTable ?? priorValueTable(ctx.setMetrics, ctx.pos.packSize);
+  const strong = ctx.deckNeedsSetting === 'strong';
+  ctx.win = vt
+    ? winValue.scorePack(vt, poolIds, packIds, ctx.pos.overall, {
+      tau: WIN_RULE.tau,
+      pickShift: pairPickShift(ctx.setMetrics?.bots),
+      info: WIN_RULE.splash ? cardInfo([...ctx.pickedCards, ...packCards], ctx.setMetrics) : null,
+      shapeScale: strong ? WIN_RULE.strongNeedsScale : 1,
+    })
+    : null;
   const win = ctx.win ?? null;
+  const lambda = tiltAt(ctx.pos) * (strong ? 0.5 : 1);
 
   const scored = packCards
     .map(card => {
@@ -1012,13 +1032,18 @@ function computeRecommendation(packCards, ctx, tier3) {
       const wheel = wheelInfo(card, ctx.pos, packCards.length, ctx.setMetrics?.table, ctx.setMetrics?.bots);
       if (win) {
         // Win-value rule: lift in the projected deck's win chance, tilted
-        // toward what top players take (see WIN_RULE).
+        // toward what top players take (see WIN_RULE); without a pick model,
+        // ties go to the better card by 17Lands grade.
         const delta = win.scores.get(card.grpId);
-        const p = ctx.modelScores.get(card.grpId);
         parts.win = delta != null ? delta * win.toPct : null;
-        const score = delta != null && p != null
-          ? delta + WIN_RULE.lambda * Math.log(Math.max(p, 1e-6) / ctx.modelMax)
-          : -Infinity;
+        let tilt = 0;
+        if (ctx.modelScores) {
+          const p = ctx.modelScores.get(card.grpId);
+          tilt = p != null ? lambda * Math.log(Math.max(p, 1e-6) / ctx.modelMax) : -Infinity;
+        } else {
+          tilt = WIN_RULE.gradeTiebreak * (cardZ(card, ctx.setMetrics) ?? -1);
+        }
+        const score = delta != null ? delta + tilt : -Infinity;
         return { card, total: score, parts, phase, synergy: syn ?? null, wheel };
       }
       let score = total;
@@ -1054,8 +1079,8 @@ function computeRecommendation(packCards, ctx, tier3) {
   if (win && scored[0].parts.win != null) {
     const parts = [];
     const pair = topPairOf(win);
-    if (pair) parts.push(`Building ${pair.pair}${pair.p < 0.6 ? ' (still open)' : ''}`);
-    parts.push(`${fmtWin(scored[0].parts.win)} to your deck's win rate`);
+    if (pair) parts.push(`Building ${pair.pair}${win.splash ? ` (splash ${win.splash})` : ''}${pair.p < 0.6 ? ' (still open)' : ''}`);
+    parts.push(scored[0].parts.win < NOTHING_HELPS_PP ? 'nothing here improves your deck' : `${fmtWin(scored[0].parts.win)} to your deck's win rate`);
     const note = shapeNote(primary, ctx);
     if (note) parts.push(note);
     explanation = parts.join(' — ');
@@ -1086,6 +1111,7 @@ function computeRecommendation(packCards, ctx, tier3) {
     win: win ? {
       byCard: Object.fromEntries(scored.filter((s) => s.parts.win != null).map((s) => [s.card.grpId, Math.round(s.parts.win * 100) / 100])),
       pair: topPairOf(win),
+      splash: win.splash ?? null,
       needs: Object.fromEntries(Object.entries(win.needs).map(([k, v]) => [k, { count: v.count, gainPct: Math.round(v.gain * win.toPct * 100) / 100 }])),
     } : null,
   };
@@ -1111,6 +1137,14 @@ function computeRecommendation(packCards, ctx, tier3) {
 const WIN_RULE = {
   tau: 0.05,
   lambda: 0.02,
+  // The tilt toward the top-player model fades as the draft goes on: early
+  // picks are about raw strength (the model's strength), later ones about
+  // what this deck needs. Multipliers by stage: first 5 picks / rest of
+  // pack 1 / pack 2 / pack 3.
+  tiltByStage: [1, 0.6, 0.4, 0.25],
+  gradeTiebreak: 0.002,     // per z, when there's no pick model (new sets)
+  splash: true,             // consider one-color splashes and fixing (winValue SPLASH)
+  strongNeedsScale: 2.5,    // "Deck needs: strong": shape costs × this, tilt halved
   closeMargin: 0.004,   // ≈ 0.1 win-rate points: show a runner-up
   wheelMargin: 0.008,   // ≈ 0.2 points: worth trying to wheel the top pick
 };
@@ -1124,6 +1158,67 @@ function pairPickShift(bots) {
   if (!bots?.colorShift) return null;
   return PAIRS.map((p) => Math.max(-2, Math.min(2, ((bots.colorShift[p[0]] ?? 0) + (bots.colorShift[p[1]] ?? 0)) / 2)));
 }
+
+/** Tilt toward the top-player model at this point of the draft. */
+function tiltAt(pos) {
+  const stage = pos.packNumber === 0 ? (pos.pickNumber < 5 ? 0 : 1) : pos.packNumber === 1 ? 2 : 3;
+  return WIN_RULE.lambda * WIN_RULE.tiltByStage[stage];
+}
+
+/**
+ * Win model for a set without a published table: the cross-set prior
+ * (valuePrior.js) applied to the live 17Lands grades. Built once per set
+ * metrics and pack size.
+ */
+function priorValueTable(setMetrics, packSize) {
+  if (!setMetrics?.cards?.length) return null;
+  const memo = setMetrics._priorValue ?? (setMetrics._priorValue = new Map());
+  const size = packSize ?? DEFAULT_PACK_SIZE;
+  if (memo.has(size)) return memo.get(size);
+  const pairWr = Object.fromEntries(Object.entries(setMetrics.pairs ?? {}).map(([p, v]) => [p, v.overallWr ?? v.wr]));
+  const cards = setMetrics.cards.filter((c) => c.mtgaId != null).map((c) => ({
+    mtgaId: c.mtgaId, color: c.color, typeLine: c.typeLine, cmc: c.cmc, oracleText: c.oracleText, z: cardZ(c, setMetrics),
+  }));
+  // setMetrics.valuePrior: research override (a prior that leaves the set out).
+  const value = valuePrior.buildPriorValue(setMetrics.valuePrior ?? VALUE_PRIOR, cards, pairWr, size);
+  const vt = value
+    ? winValue.prepareValue({ cards: Object.fromEntries(cards.map((c) => [c.mtgaId, { color: c.color, types: [c.typeLine ?? ''] }])), value })
+    : null;
+  memo.set(size, vt);
+  return vt;
+}
+
+/** Facts the win model needs for splash and fixing, per grpId. */
+function cardInfo(cards, setMetrics) {
+  const info = new Map();
+  for (const c of cards) {
+    if (!c?.grpId || info.has(c.grpId)) continue;
+    info.set(c.grpId, {
+      colors: cardColorsOf(c),
+      pips: cardTraits.pipsOf(c.manaCost, c.color),
+      z: cardZ(c, setMetrics),
+      land: isLandCard(c),
+      fixes: cardTraits.fixingColors(c),
+    });
+  }
+  return info;
+}
+
+/**
+ * "for your UR backup" when a card's lift comes from a pair other than the
+ * likeliest one — it keeps an option open rather than improving this deck.
+ */
+function hedgeNote(card, ctx) {
+  const win = ctx.win;
+  const total = win?.scores?.get(card.grpId);
+  const inTop = win?.topGain?.get(card.grpId) ?? 0;
+  if (!total || total <= 0 || inTop > 0.25 * total) return null;
+  const backup = Object.entries(win.pairProbs ?? {}).filter(([p]) => p !== win.topPair).sort((a, b) => b[1] - a[1])[0];
+  return backup ? `for your ${backup[0]} backup — doesn't help ${win.topPair}` : null;
+}
+
+// Below this lift (win-rate points) no card in the pack really helps the deck.
+const NOTHING_HELPS_PP = 0.05;
 
 const fmtWin = (pp) => `${pp >= 0 ? '+' : '−'}${Math.abs(pp).toFixed(1)}%`;
 
@@ -1327,6 +1422,7 @@ function analyze(trackerState, packCards, position, settings) {
   const ctx = {
     pickedCards: pickHistory, colorSignals, deckNeeds: deckNeeds.slice(0, 3),
     pos, draftStyle, setMetrics, commit,
+    deckNeedsSetting: settings?.deckNeeds ?? 'normal',
   };
   const wheelReport = computeWheelReport(packHistory, pickHistory, pos);
 

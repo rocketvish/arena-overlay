@@ -38,6 +38,9 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     confidenceThreshold: 4,
     draftStyle: 'balanced',
+    // How hard deck needs (creatures, two-drops, removal, curve) push picks:
+    // 'normal' = as measured in 17Lands games, 'strong' = 2.5× that.
+    deckNeeds: 'normal',
     // In-game panel: mulligan data, opponent's likely instant-speed cards, draw odds.
     gameAssistant: true,
   },
