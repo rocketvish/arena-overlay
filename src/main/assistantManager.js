@@ -78,18 +78,21 @@ async function loadLandsMap(setCode) {
  */
 async function loadSetMetrics(setCode, format = null) {
   const quickDraft = format === 'QuickDraft';
-  const [cards, ratings, table, quick] = await Promise.all([
+  const [cards, ratings, table, quick, prior] = await Promise.all([
     landsData.fetchSetData(setCode).then(r => r?.data ?? null),
     landsData.fetchColorRatings(setCode).catch(() => null),
     setData.loadSetTable(setCode).catch(() => null),
     // Quick Draft: how the bots draft (pick / last-seen positions).
     quickDraft ? landsData.fetchQuickDraftStats(setCode).catch(() => null) : null,
+    // Newest cross-set prior (null → the copy bundled with the app).
+    setData.loadValuePrior().catch(() => null),
   ]);
   if (!cards) return null;
   // Live 17Lands archetype data first; the public-data table can stand in.
   const metrics = signalAnalyzer.computeSetMetrics(cards, ratings ?? (table?.pairs ? { pairs: table.pairs } : null));
   metrics.table = table;
   metrics.bots = quick ? signalAnalyzer.computeBotProfile(cards, quick) : null;
+  if (prior) metrics.valuePrior = prior;
   return metrics;
 }
 

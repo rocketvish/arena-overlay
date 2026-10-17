@@ -33,7 +33,9 @@ function getCacheDir() {
 }
 
 const CACHE_SCHEMA = 2;
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;     // 17Lands refreshes roughly daily
+// 17Lands' live endpoint serves a rolling recent window that moves through
+// the day; re-fetch at a draft's start once the copy is 6 hours old.
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MIN_SAMPLE = 200;                        // min drawn games for a GIH-based grade
 const MIN_EST_GAMES = 100;                     // min GP games to estimate a grade
 const THIN_RESPONSE_RATIO = 0.5;               // fresh data with < 50% of cached games ⇒ keep cache

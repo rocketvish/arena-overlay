@@ -166,6 +166,69 @@ async function loadSetTable(setCode, { force = false } = {}) {
   return p;
 }
 
+// ─── Cross-set prior (deck win model for sets without public data) ──────────
+
+const PRIOR_FILE = 'valuePrior.json';
+let priorMem = null;          // { prior, fetchedAt }
+let priorInflight = null;
+
+const finite = (x) => typeof x === 'number' && Number.isFinite(x);
+const finiteArr = (a, n) => Array.isArray(a) && a.length === n && a.every(finite);
+
+/** Shape checks for a downloaded prior (see valuePrior.js). */
+function validPrior(p) {
+  const ph = p?.phantom;
+  const n = ph?.valueZ?.length;
+  if (!finite(p?.wPerZ) || p.wPerZ <= 0 || p.wPerZ > 1 || !finite(p.fillerZ) || !finite(p.pairSlope)) return false;
+  if (!Number.isInteger(n) || n < 30 || n > 60) return false;
+  if (!finiteArr(ph.sdZ, n) || !finiteArr(ph.castable, n) || !Array.isArray(ph.traits) || !ph.traits.every((t) => finiteArr(t, n))) return false;
+  return !!p.structure && Object.values(p.structure).every((s) =>
+    ['short', 'over'].every((k) => Array.isArray(s?.[k]) && s[k].length <= 10 && s[k].every((h) => Array.isArray(h) && h.length === 2 && h.every(finite))));
+}
+
+/**
+ * The newest cross-set prior: published next to the set tables (rebuilt by
+ * the daily set-data job whenever a table changes), cached for a day, with
+ * the copy bundled in the app as the fallback.
+ */
+async function loadValuePrior({ force = false } = {}) {
+  if (!force && priorMem && Date.now() - priorMem.fetchedAt < REFRESH_MS) return priorMem.prior;
+  if (priorInflight) return priorInflight;
+  priorInflight = (async () => {
+    const file = path.join(app.getPath('userData'), '17lands-cache', `derived-${PRIOR_FILE}`);
+    let cached = null, cachedAt = 0;
+    try {
+      if (fs.existsSync(file)) {
+        cached = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        cachedAt = fs.statSync(file).mtimeMs;
+        if (!validPrior(cached)) cached = null;
+      }
+    } catch { cached = null; }
+    if (!force && cached && Date.now() - cachedAt < REFRESH_MS) {
+      priorMem = { prior: cached, fetchedAt: cachedAt };
+      return cached;
+    }
+    try {
+      const res = await download(`${REMOTE_BASE}/${PRIOR_FILE}`);
+      if (res.status === 200) {
+        const raw = JSON.parse(res.body);
+        if (validPrior(raw)) {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, res.body, 'utf-8');
+          priorMem = { prior: raw, fetchedAt: Date.now() };
+          return raw;
+        }
+      }
+    } catch (e) {
+      console.warn('[setData] prior download failed:', e.message);
+    }
+    // Stale cache beats the bundled copy (it's newer); null = use the bundled one.
+    if (cached) priorMem = { prior: cached, fetchedAt: Date.now() - REFRESH_MS + MISSING_RETRY_MS };
+    return cached;
+  })().finally(() => { priorInflight = null; });
+  return priorInflight;
+}
+
 function getSetTable(setCode) {
   return tables.get(setCode) ?? null;
 }
@@ -247,6 +310,6 @@ function toRawRatings(table) {
 }
 
 module.exports = {
-  loadSetTable, getSetTable, pairGih, wheelProb, modelScores, winScores, toRawRatings, prepare,
+  loadSetTable, getSetTable, loadValuePrior, validPrior, pairGih, wheelProb, modelScores, winScores, toRawRatings, prepare,
   PAIR_PRIOR_GAMES,
 };

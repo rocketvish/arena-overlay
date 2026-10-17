@@ -131,6 +131,21 @@ async function main() {
   }
 
   if (!built.length) { console.log('Nothing to publish.'); return; }
+  // Rebuild the cross-set prior (deck win model for sets without public data)
+  // from every published table plus the ones just built; the app downloads it.
+  try {
+    const all = path.join(os.tmpdir(), 'arena-overlay-all-tables');
+    fs.rmSync(all, { recursive: true, force: true });
+    fs.mkdirSync(all, { recursive: true });
+    spawnSync('gh', ['release', 'download', 'set-data', '-p', '*.json', '-D', all, '--clobber'], { stdio: 'inherit' });
+    fs.rmSync(path.join(all, 'valuePrior.json'), { force: true });
+    for (const f of built) fs.copyFileSync(f, path.join(all, path.basename(f)));
+    const priorFile = path.join(outDir, 'valuePrior.json');
+    const pr = spawnSync(process.execPath, [path.join(__dirname, 'build-prior.js'), all, '--out', priorFile], { stdio: 'inherit' });
+    if (pr.status === 0) built.push(priorFile);
+  } catch (e) {
+    console.error(`prior rebuild skipped: ${e.message}`);
+  }
   const r = spawnSync(process.execPath, [path.join(__dirname, 'publish.js'), ...built], { stdio: 'inherit' });
   if (r.status !== 0) process.exitCode = 1;
 }

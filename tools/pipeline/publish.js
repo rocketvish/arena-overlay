@@ -5,6 +5,8 @@
  *
  *   node tools/pipeline/publish.js data/sets/HOB.json data/sets/EOE.json …
  *
+ * Also uploads the cross-set prior (valuePrior.json, from build-prior.js).
+ *
  * The release is a pre-release so electron-updater (which follows the latest
  * stable release) never mistakes it for an app update. Requires the GitHub CLI.
  */
@@ -21,7 +23,8 @@ if (!files.length) {
 }
 for (const f of files) {
   const t = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (t.schema !== 1 || !t.set || !t.model) throw new Error(`${f} doesn't look like a set table`);
+  const isPrior = require('path').basename(f) === 'valuePrior.json' && typeof t.wPerZ === 'number' && t.phantom;
+  if (!isPrior && (t.schema !== 1 || !t.set || !t.model)) throw new Error(`${f} doesn't look like a set table`);
 }
 
 const gh = (...args) => execFileSync('gh', args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
