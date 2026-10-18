@@ -144,6 +144,7 @@ async function loadGames(file, cards) {
       splash: (row[cols.splash] ?? '') !== '' ? 1 : 0,
       lands: landSlot(lands),
       landsN: lands,
+      splashColors: String(row[cols.splash] ?? "").replace(/[^WUBRG]/g, ""),
       shape: Object.entries(STRUCTURE).map(([name, s]) => hinges(s, shape[name])),
     });
   }
@@ -187,7 +188,10 @@ function features(games, g, L, use) {
  * strengths on the summed loss: `l2` for dense slots and per-card weights,
  * `l2Pair` (much larger) for per-pair weights.
  */
-function train(games, L, use, { epochs = 6, lr = 0.05, l2 = 20, l2Pair = 400, include = null, log = () => {} } = {}) {
+function train(games, L, use, { epochs = 6, lr = 0.05, l2 = 20, l2Pair = 400, include = null, seed = null, log = () => {} } = {}) {
+  // A seed makes the shuffle order repeatable (research: compare variants on equal footing).
+  let st = seed ?? 0;
+  const rand = seed == null ? Math.random : () => { st = (Math.imul(st, 1664525) + 1013904223) >>> 0; return st / 4294967296; };
   const w = new Float64Array(L.size);
   const G = new Float64Array(L.size).fill(1e-8);
   const trainIdx = [];
@@ -195,7 +199,7 @@ function train(games, L, use, { epochs = 6, lr = 0.05, l2 = 20, l2Pair = 400, in
   const feats = trainIdx.map((g) => features(games, g, L, use));
   const order = Uint32Array.from(trainIdx.keys());
   for (let ep = 0; ep < epochs; ep++) {
-    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
     let loss = 0;
     for (const k of order) {
       const { idx, val } = feats[k];

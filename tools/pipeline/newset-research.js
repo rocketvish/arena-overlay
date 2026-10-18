@@ -23,6 +23,7 @@ const { loadContext } = require('../../scripts/eval-picks');
 const { derivePrior } = require('../../src/main/valuePrior');
 const sa = require('../../src/main/signalAnalyzer');
 const setData = require('../../src/main/setData');
+const winValue = require('../../src/main/winValue');
 const tracker = require('../../src/main/draftTracker');
 
 function parseArgs(argv) {
@@ -33,6 +34,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--tilt') a.tilt = true;
     else if (argv[i] === '--vacuum') a.vacuum = true;
     else if (argv[i] === '--inclusion') a.inclusion = true;
+    else if (argv[i] === '--splash') a.splash = true;
     else if (!a.set) a.set = argv[i].toUpperCase();
   }
   return a;
@@ -95,6 +97,8 @@ async function main() {
   // z in the pack, or in your two most-picked colors), which don't use the analyzer.
   const variants = args.tilt
     ? { table: { ...base }, flat: { ...base }, nosplash: { ...base }, before: { ...base } }
+    : args.splash
+    ? { table: { ...base }, cost: { ...base }, costNoFix: { ...base } }
     : args.inclusion
     ? { table: { ...base }, incl: { ...base, table: inclusionTables.incl }, incl2: { ...base, table: inclusionTables.incl2 } }
     : args.vacuum
@@ -116,9 +120,12 @@ async function main() {
     },
   };
   // before = the rule as validated earlier (flat tilt, no splash).
+  // --splash: a splash costs what the deck model measures (~2–4pp a game,
+  // whatever the fixing) instead of SPLASH.deckCost 0.01.
+  const splashFor = { cost: { deckCost: 0.13 }, costNoFix: { deckCost: 0.13, perFix: 0, base: 0.75 } };
   const ruleFor = { flat: { tiltByStage: [1, 1, 1, 1] }, nosplash: { splash: false }, before: { tiltByStage: [1, 1, 1, 1], splash: false } };
   const names = Object.keys(variants);
-  const pairsToCompare = args.inclusion ? [['incl', 'table'], ['incl2', 'table']] : args.vacuum ? [['table', 'gih'], ['table', 'gihColors'], ['prior', 'gih'], ['prior', 'gihColors']] : args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
+  const pairsToCompare = args.splash ? [['cost', 'table'], ['costNoFix', 'table']] : args.inclusion ? [['incl', 'table'], ['incl2', 'table']] : args.vacuum ? [['table', 'gih'], ['table', 'gihColors'], ['prior', 'gih'], ['prior', 'gihColors']] : args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
 
   const rows = [];
   const agree = Object.fromEntries(names.map((k) => [k, [0, 0]]));
@@ -145,12 +152,15 @@ async function main() {
           for (const k of names) {
             const saved = ruleFor[k] ? Object.fromEntries(Object.keys(ruleFor[k]).map((x) => [x, sa.WIN_RULE[x]])) : null;
             if (saved) Object.assign(sa.WIN_RULE, ruleFor[k]);
+            const savedSplash = splashFor[k] ? { ...winValue.SPLASH } : null;
+            if (savedSplash) Object.assign(winValue.SPLASH, splashFor[k]);
             if (vacuum[k] && !variants[k]) rec[k] = vacuum[k](pack, ts.pickHistory);
             else {
               const a = sa.analyze({ ...ts, setMetrics: variants[k] }, pack, { packNumber, pickNumber, packSize }, args.settings);
               rec[k] = a.recommendation?.primary?.grpId ?? null;
             }
             if (saved) Object.assign(sa.WIN_RULE, saved);
+            if (savedSplash) Object.assign(winValue.SPLASH, savedSplash);
             agree[k][0] += rec[k] === pk.taken ? 1 : 0; agree[k][1]++;
           }
           for (const [a, b] of pairsToCompare) {

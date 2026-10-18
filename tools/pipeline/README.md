@@ -103,6 +103,21 @@ HOB / SOS / ECL against the shipped model before adopting:
   the per-pair phantom future picks (what drafters who ended in a pair actually got later). The
   ATA residual disagrees with that realized value (HOB r = −0.92: the late color is the weak one).
 
+Second round (`expert-research.js`, `pack-baseline-research.js`, `newset-research.js --splash`):
+
+- **Card × player skill** (17Lands "Learning from the Best"): one shrunk slope per card on the
+  skill bucket. Worse held-out in every set (t −1.3 / −1.3 / −3.7) — it overfits. Not adopted.
+- **Deck shape by color pair** (Sierkovitz, "Finding Plans"): per-pair shape hinges. No gain
+  (t −1.1 / −0.1 / −1.1). Not adopted.
+- **Per-pack ATA baselines for openness** (Sierkovitz, "Data-Based Heuristics"): per-pack ATA
+  differs from the global one by only ~0.2 picks, and the read predicts the next 3 picks' color
+  quality no better (r 0.124 vs 0.126, 0.124 vs 0.125, 0.116 vs 0.116). Not adopted.
+- **Splash and fixing**: splash decks win 2–4.5 points less per game with cards and skill held
+  constant (HOB −4, SOS −4, ECL −2.4), and fixing doesn't change it (flat across 0 / 1 / 2 / 3+
+  fixers). The app's splash cost was a token 0.01 log-odds; replays with 0.13: +0.56 / −0.14 /
+  +0.37pp match win per changed pick (t 1.7 / −0.4 / 0.9). **Adopted** (`SPLASH.deckCost`). Dropping
+  the per-fixer bonus too made no measurable difference, so the fixing rule stays.
+
 ## Synergy lane (recommendations only)
 
 Cards that 17Lands' overall win rate undersells get their own recommendation, never a change to

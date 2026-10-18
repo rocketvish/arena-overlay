@@ -213,8 +213,12 @@ function withCard(vt, deck, c) {
 // it's strong (17Lands z ≥ minZ, about B+) and needs at most one pip of it.
 // It plays at a discount (inconsistent mana) that each land or mana rock
 // making the splash color shrinks — that's what fixing is worth, and only
-// once there's something to splash. A splash also costs the deck a little.
-const SPLASH = { minZ: 1.0, maxPips: 1, base: 0.55, perFix: 0.12, maxFix: 3, deckCost: 0.01 };
+// once there's something to splash. A splash also costs the deck itself:
+// with cards and skill held constant, splash decks win 2–4.5 points less per
+// game in HOB / SOS / ECL (deckCost ≈ 0.09–0.18 log-odds), with or without
+// fixing (tools/pipeline/expert-research.js). Draft replays with 0.13 instead
+// of a token 0.01: +0.56 / −0.14 / +0.37pp match win per changed pick.
+const SPLASH = { minZ: 1.0, maxPips: 1, base: 0.55, perFix: 0.12, maxFix: 3, deckCost: 0.13 };
 const COLOR_LIST = ['W', 'U', 'B', 'R', 'G'];
 
 /** Per pair: the off color this card could be splashed as, or null. */
