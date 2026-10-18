@@ -143,6 +143,7 @@ async function loadGames(file, cards) {
       pairSlot: p >= 0 ? p : main.length <= 1 ? PAIRS.length : PAIRS.length + 1,
       splash: (row[cols.splash] ?? '') !== '' ? 1 : 0,
       lands: landSlot(lands),
+      landsN: lands,
       shape: Object.entries(STRUCTURE).map(([name, s]) => hinges(s, shape[name])),
     });
   }

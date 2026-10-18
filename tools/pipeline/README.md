@@ -84,6 +84,25 @@ in your top two colors). Taking the table's pick where they disagree: +0.08 / +0
 match win per pick vs top GIH and +0.16 / +0.08 / +0.07 vs top GIH in colors (HOB / SOS / ECL),
 positive in all six, each |t| < 2. The prior alone is about even with them (mixed signs).
 
+## Pro-practice checks (tested, not adopted)
+
+Ideas from expert Limited content (Sierkovitz / 17Lands analyses, LR, PVDDR), each tested on
+HOB / SOS / ECL against the shipped model before adopting:
+
+- **Curve beyond two-drops** (`curve-research.js`): simulated mana spent on turns 1–4 and hinges on
+  3/4/5-drop counts. No consistent held-out gain (t −2.3 … +1.3, mixed signs). Too few three-drops
+  and too many four-drops cost ~0.3–0.45pp per card in every set, but even those two terms alone
+  don't predict better. Real decks barely vary in curve (spent T1–4 sd ≈ 0.5 mana).
+- **Selective inclusion** (`inclusion.js`, `newset-research.js --inclusion`): discount cards that
+  drafters bench even when on color (Meek Attack: maindecked 2% vs ~90% for its value). Picks
+  agree more with drafters (+1–2pp), but outcomes are mixed: −0.27 / +0.46 / +0.13pp per pick (|t| ≤ 1.4).
+- **Trophy objective**: Premier and Quick Draft gem payouts are nearly linear in match win rate
+  (Premier ~37–39 gems per point between 55% and 60%), so maximizing expected gems instead of win rate
+  moves pick scores by ~5%. Trophy *count* is convex, but gems are the reward.
+- **Format "underdrafted color" prior** (ATA vs GIH residual by color): already in the model as
+  the per-pair phantom future picks (what drafters who ended in a pair actually got later). The
+  ATA residual disagrees with that realized value (HOB r = −0.92: the late color is the weak one).
+
 ## Synergy lane (recommendations only)
 
 Cards that 17Lands' overall win rate undersells get their own recommendation, never a change to

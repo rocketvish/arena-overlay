@@ -22,6 +22,7 @@ const path = require('path');
 const { loadContext } = require('../../scripts/eval-picks');
 const { derivePrior } = require('../../src/main/valuePrior');
 const sa = require('../../src/main/signalAnalyzer');
+const setData = require('../../src/main/setData');
 const tracker = require('../../src/main/draftTracker');
 
 function parseArgs(argv) {
@@ -31,6 +32,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--strong') a.settings.deckNeeds = 'strong';
     else if (argv[i] === '--tilt') a.tilt = true;
     else if (argv[i] === '--vacuum') a.vacuum = true;
+    else if (argv[i] === '--inclusion') a.inclusion = true;
     else if (!a.set) a.set = argv[i].toUpperCase();
   }
   return a;
@@ -69,11 +71,32 @@ async function main() {
 
   // Three views of the set: no win model / prior win model / real table.
   const base = { ...ctx.metrics };
+  // --inclusion: card values discounted for selective inclusion (inclusion.js).
+  const inclusionTables = {};
+  if (args.inclusion) {
+    const { playRates, discountValues } = require('./inclusion');
+    const { cardTable } = require('./cards');
+    const { ensureDataset } = require('./build-set');
+    const { cards } = await cardTable(args.set, args.cache);
+    const game = await ensureDataset('game_data', args.set, 'PremierDraft', args.cache);
+    const rates = await playRates(args.set, game.file, cards, args.cache);
+    for (const [name, kappa] of [['incl', 1], ['incl2', 2]]) {
+      const { w, changes } = discountValues(ctx.table.value, rates, { kappa });
+      inclusionTables[name] = setData.prepare({ ...ctx.table, value: { ...ctx.table.value, w } }, 0);
+      if (kappa === 1) {
+        const nm = (id) => ctx.byId.get(id)?.name ?? id;
+        const top = changes.sort((a, b) => (b.w - b.w2) - (a.w - a.w2)).slice(0, 8);
+        console.log(`  inclusion: ${changes.length} cards discounted; largest: ${top.map((c) => `${nm(c.id)} (plays ${(100 * c.r).toFixed(0)}% vs ${(100 * c.expected).toFixed(0)}%, ${(c.w * 25).toFixed(1)}→${(c.w2 * 25).toFixed(1)}pp)`).join(', ')}`);
+      }
+    }
+  }
   // --tilt: the table rule with the fading top-player tilt vs a flat one.
   // --vacuum: the rules against "best card in a vacuum" (highest 17Lands GIH
   // z in the pack, or in your two most-picked colors), which don't use the analyzer.
   const variants = args.tilt
     ? { table: { ...base }, flat: { ...base }, nosplash: { ...base }, before: { ...base } }
+    : args.inclusion
+    ? { table: { ...base }, incl: { ...base, table: inclusionTables.incl }, incl2: { ...base, table: inclusionTables.incl2 } }
     : args.vacuum
     ? { table: { ...base }, prior: { ...base, table: null, valuePrior: prior }, gih: null, gihColors: null }
     : { old: { ...base, table: null, cards: undefined }, prior: { ...base, table: null, valuePrior: prior }, table: { ...base } };
@@ -95,7 +118,7 @@ async function main() {
   // before = the rule as validated earlier (flat tilt, no splash).
   const ruleFor = { flat: { tiltByStage: [1, 1, 1, 1] }, nosplash: { splash: false }, before: { tiltByStage: [1, 1, 1, 1], splash: false } };
   const names = Object.keys(variants);
-  const pairsToCompare = args.vacuum ? [['table', 'gih'], ['table', 'gihColors'], ['prior', 'gih'], ['prior', 'gihColors']] : args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
+  const pairsToCompare = args.inclusion ? [['incl', 'table'], ['incl2', 'table']] : args.vacuum ? [['table', 'gih'], ['table', 'gihColors'], ['prior', 'gih'], ['prior', 'gihColors']] : args.tilt ? [['table', 'before'], ['table', 'flat'], ['table', 'nosplash']] : [['prior', 'old'], ['table', 'prior'], ['table', 'old']];
 
   const rows = [];
   const agree = Object.fromEntries(names.map((k) => [k, [0, 0]]));
