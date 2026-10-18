@@ -31,6 +31,7 @@ const zlib = require('zlib');
 const { readCsvGz, normCardName } = require('./csv');
 const { loadCardList } = require('./cards');
 const winModel = require('./winModel');
+const { playRates, inclusionStats } = require('./inclusion');
 
 const COLORS = 'WUBRG';
 const POD_SIZE = 8;
@@ -497,6 +498,17 @@ async function main() {
     console.warn(`  deck win model skipped: ${e.message}`);
   }
 
+  // Selective inclusion: how often a drafted, on-color copy is maindecked,
+  // next to cards of similar deck value (the UI flags "situational" cards).
+  let incl = new Map();
+  if (game && value) try {
+    const byName = new Map([...cardList].map(([k, m]) => [k, { mtgaId: m.mtgaId, color: m.color, land: isLand(m.name) }]));
+    incl = inclusionStats(value, await playRates(args.set, game.file, byName, null, { all: true }));
+    console.log(`  maindeck rates for ${incl.size} cards`);
+  } catch (e) {
+    console.warn(`  maindeck rates skipped: ${e.message}`);
+  }
+
   // ── Assemble the shipped table ────────────────────────────────────────────
   const cards = {};
   const modelOrder = [];
@@ -529,6 +541,9 @@ async function main() {
         return [[pair, [r4(pp.has[c] / games), Math.round((pp.copies[c] / pp.has[c]) * 100) / 100]]];
       })),
     };
+    const inc = incl.get(meta.mtgaId);
+    // [maindeck rate when drafted on color, rate for cards this good, copies]
+    if (inc) cards[meta.mtgaId].incl = [r4(inc.r), r4(inc.expected), inc.n];
     modelOrder.push([meta.mtgaId, c]);
   }
   const dim = model.dim;

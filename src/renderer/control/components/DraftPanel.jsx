@@ -126,6 +126,12 @@ function PickOptionCard({ pick }) {
           {pick.synergy && pick.kind !== 'synergy' && (
             <span style={{ fontSize: 12, color: PICK_KIND_META.synergy.color }} title="Also a synergy-lane pick">⚭</span>
           )}
+          {pick.situational && (
+            <span style={{ fontSize: 9, fontWeight: 700, color: '#e0b060', border: '1px solid rgba(224,176,96,0.45)', borderRadius: 3, padding: '0 4px', letterSpacing: '0.04em', flexShrink: 0 }}
+                  title="Drafters often bench this even when it's in their colors; its win rate comes from the decks it fits">
+              SITUATIONAL
+            </span>
+          )}
           <span style={{ fontSize: 14, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {card?.name ?? `#${card?.grpId ?? '?'}`}
           </span>

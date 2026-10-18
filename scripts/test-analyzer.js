@@ -381,6 +381,20 @@ test('synergy lane: an archetype standout is recommended when its lane is open',
   assert.match(syn.reason, /Synergy for WU/);
 });
 
+test('situational cards are flagged, not re-ranked', () => {
+  const t = winTable();
+  // W Spell: maindecked in 12% of on-color decks vs 80% for cards this good.
+  t.cards[102] = { ...t.cards[102], incl: [0.12, 0.8, 900] };
+  t.cards[101] = { ...t.cards[101], incl: [0.75, 0.8, 900] };
+  const mk = (id, z) => ({ grpId: id, name: t.cards[id].name, color: t.cards[id].color, typeLine: t.cards[id].types.join(' '), stats: { z, grade: 'C' } });
+  const run = (table) => sa.analyze({ packHistory: [], pickHistory: [], setMetrics: { ...metrics, table }, packSize: 14 }, [mk(101, 0), mk(102, 0)], { packNumber: 0, pickNumber: 3, packSize: 14 }, {});
+  const a = run(t);
+  const flagged = a.recommendation.picks.filter((p) => p.situational).map((p) => p.card.grpId);
+  assert.deepStrictEqual(flagged, [102]);
+  assert.match(a.recommendation.picks.find((p) => p.card.grpId === 102).reason, /Situational: maindecked in 12%/);
+  assert.strictEqual(a.recommendation.primary.grpId, run(winTable()).recommendation.primary.grpId, 'ranking unchanged');
+});
+
 console.log('\nPack 2 forecast');
 
 test("what the left side took in pack 1 counts against that color in pack 2", () => {

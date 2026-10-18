@@ -1137,6 +1137,26 @@ function copyNote(card, ctx) {
   return `${nth} copy`;
 }
 
+// Selective inclusion (17Lands' "Learning from the Best"): a card drafters
+// bench even when it's on color wins its games in the decks that do play it,
+// so its win rate oversells it elsewhere. Flagged, not re-ranked — tested as
+// a ranking discount it didn't beat the model (tools/pipeline/README.md).
+const SITUATIONAL = { ratio: 0.5, minN: 200 };
+
+/** { rate, typical } when the set table says the card is situational, else null. */
+function situational(card, ctx) {
+  const inc = ctx.setMetrics?.table?.cards?.[card?.grpId]?.incl;
+  if (!Array.isArray(inc) || inc.length < 3 || !(inc[2] >= SITUATIONAL.minN)) return null;
+  const [rate, typical] = inc;
+  return rate <= SITUATIONAL.ratio * typical ? { rate, typical } : null;
+}
+
+/** "Situational: maindecked in 9% of decks that could play it (85% for cards this good)". */
+function situationalNote(card, ctx) {
+  const s = situational(card, ctx);
+  return s && `Situational: maindecked in ${Math.round(s.rate * 100)}% of decks that could play it (${Math.round(s.typical * 100)}% for cards this good)`;
+}
+
 /**
  * Up to MAX_OPTIONS different cards, each with what it's for, so the
  * tradeoffs are visible: best for the deck, strongest card, what fills the
@@ -1152,9 +1172,9 @@ function buildWinOptions(scored, ctx) {
     if (!entry || listed.has(entry.card.grpId) || options.length >= MAX_OPTIONS) return;
     listed.add(entry.card.grpId);
     const card = entry.card;
-    const notes = [copyNote(card, ctx)];
+    const notes = [copyNote(card, ctx), situationalNote(card, ctx)];
     const reason = [why, `${fmtWin(winOf(entry))} deck win`, gihLabel(card), ...notes].filter(Boolean).join(' · ');
-    options.push({ kind, card, reason, reasonLong: reason, winPct: Math.round(winOf(entry) * 100) / 100, gih: card.stats?.gihwr ?? card.stats?.gihwrEst ?? null });
+    options.push({ kind, card, reason, reasonLong: reason, winPct: Math.round(winOf(entry) * 100) / 100, gih: card.stats?.gihwr ?? card.stats?.gihwrEst ?? null, situational: !!situational(card, ctx) });
   };
   const top = scored[0];
   if (!top) return options;
