@@ -756,7 +756,8 @@ function pipsOf(card) {
 
 /** Position in the draft. `overall` = cards drafted before this pick. */
 function draftPosition(packNumber, pickNumber, packSize) {
-  const size = packSize ?? DEFAULT_PACK_SIZE;
+  // Pack size comes from the log; keep it to real pack sizes.
+  const size = Number.isInteger(packSize) && packSize >= 5 && packSize <= 20 ? packSize : DEFAULT_PACK_SIZE;
   return { packNumber, pickNumber, packSize: size, overall: packNumber * size + pickNumber };
 }
 

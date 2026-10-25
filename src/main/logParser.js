@@ -160,6 +160,11 @@ function detectFormat(lines) {
 // Which endpoint we are currently collecting a response body for
 let pendingEndpoint = null;
 let pendingBuffer   = '';
+let pendingLines    = 0;
+
+// An unterminated body would otherwise grow (and be re-parsed) forever.
+const MAX_PENDING_CHARS = 8 * 1024 * 1024;
+const MAX_PENDING_LINES = 2000;
 
 // ─── Endpoint matching ────────────────────────────────────────────────────────
 
@@ -193,6 +198,19 @@ function reset() {
 }
 
 function parseLine(rawLine, broadcast) {
+  // One malformed line must never throw out of the watcher's timer or
+  // chokidar callback — log it and drop whatever body was being collected.
+  try {
+    parseLineUnsafe(rawLine, broadcast);
+  } catch (e) {
+    appLogger.log('parser', 'warn', 'Line handler threw', e.message);
+    pendingEndpoint = null;
+    pendingBuffer   = '';
+    logParseFailure(String(rawLine));
+  }
+}
+
+function parseLineUnsafe(rawLine, broadcast) {
   // Update broadcast if provided
   if (broadcast && typeof broadcast === 'function') {
     broadcastFn = broadcast;
@@ -289,7 +307,21 @@ function parseLine(rawLine, broadcast) {
   if (pendingEndpoint) {
     if (SKIP_RE.test(line) || line.trim() === '') return;
 
+    if (!pendingBuffer) pendingLines = 0;
     pendingBuffer += line + '\n';
+    pendingLines++;
+
+    if (pendingBuffer.length > MAX_PENDING_CHARS || pendingLines > MAX_PENDING_LINES) {
+      appLogger.log('parser', 'warn',
+        `Dropping unterminated ${pendingEndpoint} body (${pendingLines} lines, ${pendingBuffer.length} chars)`);
+      pendingEndpoint = null;
+      pendingBuffer   = '';
+      return;
+    }
+
+    // Only a line that closes an object/array can complete the body.
+    const tail = line.trimEnd();
+    if (!tail.endsWith('}') && !tail.endsWith(']')) return;
 
     if (pendingBuffer.trim().startsWith('{') || pendingBuffer.trim().startsWith('[')) {
       try {
@@ -321,11 +353,13 @@ function incrementEvent() {
 function tryHandleRequest(endpoint, raw) {
   let outer;
   try { outer = JSON.parse(raw); } catch { return; }
+  if (!outer || typeof outer !== 'object') return;
 
   let req = outer.request || outer;
   if (typeof req === 'string') {
     try { req = JSON.parse(req); } catch { return; }
   }
+  if (!req || typeof req !== 'object') return;
 
   if (PATTERNS.draftComplete.some(p => endpoint.includes(p))) {
     endDraft(endpoint);
@@ -379,8 +413,10 @@ const emittedPools = new Set(); // courseId:poolSize already announced
 
 function handleCourses(outer) {
   const courses = outer.Courses ?? (outer.Course ? [outer.Course] : []);
+  if (!Array.isArray(courses)) return;
   for (const c of courses) {
-    const name = c.InternalEventName ?? '';
+    if (!c || typeof c !== 'object') continue;
+    const name = typeof c.InternalEventName === 'string' ? c.InternalEventName : '';
     const pool = Array.isArray(c.CardPool) ? c.CardPool.map(Number).filter(Number.isFinite) : [];
     // Only while building — finished events stay in the course list for days.
     if (!/Sealed/i.test(name) || pool.length < 40 || c.CurrentModule !== 'DeckSelect') continue;
@@ -402,6 +438,7 @@ function tryHandleResponse(endpoint, raw) {
     console.warn(`[parser] JSON parse failed for ${endpoint}:`, e.message);
     return;
   }
+  if (!outer || typeof outer !== 'object') return;
 
   if (COURSE_ENDPOINTS.test(endpoint)) {
     handleCourses(outer);
@@ -477,7 +514,8 @@ function extractEventInfo(eventName) {
   if (typeof eventName !== 'string' || !eventName) return { setCode: null, format: null };
   const parts = eventName.split('_');
   const setCode = parts.length >= 2 ? validSetCode(parts[1]) : null;
-  const format = EVENT_FORMAT_MAP[parts[0]] ?? null;
+  // hasOwn: names like "constructor_FRA_x" must not hit Object.prototype.
+  const format = Object.hasOwn(EVENT_FORMAT_MAP, parts[0]) ? EVENT_FORMAT_MAP[parts[0]] : null;
   return { setCode, format };
 }
 
@@ -518,7 +556,8 @@ function handleDraftPayload(payload) {
 
   const normalizedPack = packCards.map(c => {
     if (typeof c === 'string' || typeof c === 'number') return { grpId: parseInt(c) };
-    if (typeof c === 'object') return { grpId: parseInt(c.grpId ?? c.CardId ?? c.cardId ?? c.id), ...c };
+    // Parsed grpId goes last so a raw string grpId can't overwrite it.
+    if (c && typeof c === 'object') return { ...c, grpId: parseInt(c.grpId ?? c.CardId ?? c.cardId ?? c.id) };
     return null;
   }).filter(c => c && !isNaN(c.grpId));
 
@@ -536,6 +575,17 @@ function toInt(v) {
   if (v == null || v === '') return null;
   const n = parseInt(v);
   return Number.isNaN(n) ? null : n;
+}
+
+// Pack/pick numbers come straight from the log and size downstream arrays,
+// so anything outside a real draft's range is treated as missing.
+const MAX_PACK_NUMBER = 3;
+const MAX_PICK_NUMBER = 19;
+const MIN_PACK_SIZE = 5;
+const MAX_PACK_SIZE = 20;
+
+function boundedInt(v, min, max) {
+  return Number.isInteger(v) && v >= min && v <= max ? v : null;
 }
 
 /**
@@ -567,8 +617,9 @@ function handleDraftNotify(raw) {
     appLogger.log('parser', 'warn', 'Draft.Notify parse failed', e.message);
     return;
   }
+  if (!payload || typeof payload !== 'object') return;
   const cardsRaw = payload.PackCards ?? payload.packCards;
-  const cards = (typeof cardsRaw === 'string' ? cardsRaw.split(',') : (cardsRaw ?? []))
+  const cards = (typeof cardsRaw === 'string' ? cardsRaw.split(',') : (Array.isArray(cardsRaw) ? cardsRaw : []))
     .map(id => ({ grpId: parseInt(id) }))
     .filter(c => !isNaN(c.grpId));
   if (cards.length === 0) return;
@@ -599,6 +650,9 @@ function endDraft(reason) {
 }
 
 function applyPack({ cards: normalizedPack, packNumber, pickNumber, eventName, setCode, format: fmtFromEvent }) {
+  packNumber = boundedInt(packNumber, 0, MAX_PACK_NUMBER);
+  pickNumber = boundedInt(pickNumber, 0, MAX_PICK_NUMBER);
+
   // A different event, or a fresh P1p1 after we'd already moved past it,
   // means a new draft began without us seeing the previous one finish
   // (abandoned draft, app started mid-way, etc.). Start over cleanly.
@@ -618,8 +672,10 @@ function applyPack({ cards: normalizedPack, packNumber, pickNumber, eventName, s
 
   // Learn the pack size from the first pick of a pack (full pack), or infer
   // it from a later pick if we joined mid-pack.
-  if (pickNumber === 0) state.packSize = normalizedPack.length;
-  else if (state.packSize == null && pickNumber != null) state.packSize = normalizedPack.length + pickNumber;
+  let learnedSize;
+  if (pickNumber === 0) learnedSize = normalizedPack.length;
+  else if (state.packSize == null && pickNumber != null) learnedSize = normalizedPack.length + pickNumber;
+  if (learnedSize !== undefined) state.packSize = boundedInt(learnedSize, MIN_PACK_SIZE, MAX_PACK_SIZE);
 
   if (state.packSize != null && pickNumber != null) {
     const expected = state.packSize - pickNumber;
@@ -706,8 +762,8 @@ function applyPack({ cards: normalizedPack, packNumber, pickNumber, eventName, s
  * pack currently on screen.
  */
 function handlePick(grpId, packNumber = null, pickNumber = null) {
-  const pack = packNumber ?? state.packNumber ?? 0;
-  const pick = pickNumber ?? state.pickNumber ?? 0;
+  const pack = boundedInt(packNumber, 0, MAX_PACK_NUMBER) ?? state.packNumber ?? 0;
+  const pick = boundedInt(pickNumber, 0, MAX_PICK_NUMBER) ?? state.pickNumber ?? 0;
 
   // Deduplicate: only emit if this pick is strictly newer than the last one.
   // Replayed MakePick lines (from the initial scan context) must not re-fire

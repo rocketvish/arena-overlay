@@ -107,25 +107,53 @@ function isPackResponseLine(line) {
   return line.startsWith('<==') && PACK_RESPONSE_MARKERS.some(m => line.includes(m));
 }
 
+// The initial scan only reads the tail of the log. A draft's events sit near
+// the end in practice, and Player.log can grow to hundreds of MB.
+const INITIAL_SCAN_BYTES = 32 * 1024 * 1024;
+
 function initialScan(filePath) {
-  let raw;
   try {
-    raw = fs.readFileSync(filePath);
+    scanLogTail(filePath);
+  } catch (err) {
+    appLogger.log('logWatcher', 'error', 'Initial scan failed', err.message);
+    console.error('[logWatcher] Initial scan failed:', err.message);
+  }
+}
+
+function scanLogTail(filePath) {
+  let raw;
+  let start;
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      start = Math.max(0, size - INITIAL_SCAN_BYTES);
+      raw = Buffer.alloc(size - start);
+      raw = raw.subarray(0, fs.readSync(fd, raw, 0, raw.length, start));
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (err) {
     appLogger.log('logWatcher', 'error', 'Cannot read log for initial scan', err.message);
     console.error('[logWatcher] Cannot read log for initial scan:', err.message);
     return;
   }
-  // Size of exactly what we read — a separate stat() could include bytes
+  // End of exactly what we read — a separate stat() could include bytes
   // Arena wrote in between, which would then never be parsed.
-  lastSize = raw.length;
+  lastSize = start + raw.length;
   decoder = new StringDecoder('utf8');
+
+  // Starting mid-file lands inside a line: skip to the first full one.
+  if (start > 0) {
+    const nl = raw.indexOf(0x0a);
+    raw = nl === -1 ? raw.subarray(raw.length) : raw.subarray(nl + 1);
+  }
 
   // Player.log uses CRLF line endings — split on both so no line keeps a '\r'.
   // An unterminated last line (Arena mid-write) is held until the rest arrives.
   const { lines, carry } = splitLogChunk('', decoder.write(raw));
   partialLine = carry;
-  console.log(`[logWatcher] Initial scan: ${lines.length} lines, ${raw.length} bytes`);
+  console.log(`[logWatcher] Initial scan: ${lines.length} lines, ${raw.length} bytes from offset ${start}`);
 
   // Walk backwards to find the last DraftStatus *response* line (<==).
   // Searching for responses (not requests) ensures we start at the most recent

@@ -193,7 +193,8 @@ const slim = (o) => ({
   grpId: o.grpId, instanceId: o.instanceId,
   isLand: isLandObj(o), isCreature: (o.cardTypes ?? []).includes('CardType_Creature'),
   tapped: !!o.isTapped, power: o.power?.value ?? null, toughness: o.toughness?.value ?? null,
-  colors: (o.subtypes ?? []).map((s) => LAND_SUBTYPE_COLOR[s]).filter(Boolean),
+  colors: (Array.isArray(o.subtypes) ? o.subtypes : [])
+    .map((s) => (Object.hasOwn(LAND_SUBTYPE_COLOR, s) ? LAND_SUBTYPE_COLOR[s] : null)).filter(Boolean),
 });
 
 function snapshot() {

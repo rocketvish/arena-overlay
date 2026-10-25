@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 // ── Primitives ────────────────────────────────────────────────────────────────
 function Section({ title, children }) {
@@ -66,15 +66,39 @@ function Select({ label, value, options, onChange }) {
   );
 }
 
-function TextInput({ label, value, onChange }) {
+/**
+ * Saved on Enter or blur, not per keystroke: a half-typed hotkey ("C") would
+ * otherwise be registered as a global shortcut. Esc or a rejected value
+ * (the main process validates every setting) puts the saved value back.
+ */
+function TextInput({ label, value, onChange, hint }) {
+  const [draft, setDraft] = useState(value ?? '');
+  const [error, setError] = useState(false);
+  useEffect(() => { setDraft(value ?? ''); setError(false); }, [value]);
+  const commit = async () => {
+    if (draft === (value ?? '')) return;
+    try {
+      await onChange(draft);
+      setError(false);
+    } catch {
+      setError(true);
+      setDraft(value ?? '');
+    }
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 12, color: '#c8c8c8' }}>{label}</span>
-      <input type="text" value={value ?? ''} onChange={(e) => onChange(e.target.value)} style={{
-        background: 'rgba(30,30,50,0.9)', border: '1px solid rgba(255,255,255,0.15)',
-        borderRadius: 4, color: '#b0b0b0', fontSize: 10, padding: '4px 7px',
-        fontFamily: 'monospace',
-      }} />
+      <input type="text" value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          else if (e.key === 'Escape') { setDraft(value ?? ''); setError(false); }
+        }}
+        style={{
+          background: 'rgba(30,30,50,0.9)', border: `1px solid ${error ? 'rgba(255,120,100,0.7)' : 'rgba(255,255,255,0.15)'}`,
+          borderRadius: 4, color: '#b0b0b0', fontSize: 10, padding: '4px 7px',
+          fontFamily: 'monospace',
+        }} />
+      {(error || hint) && <span style={{ fontSize: 10, color: error ? '#ff9a8a' : '#777' }}>{error ? `Not saved. ${hint ?? 'Invalid value.'}` : hint}</span>}
     </div>
   );
 }
@@ -195,6 +219,7 @@ export default function SettingsPanel({ settings, onSet, onClose }) {
           value={general.arenaLogPath}
           onChange={(v) => onSet('general.arenaLogPath', v)} />
         <TextInput label="Show / hide window hotkey"
+          hint="A modifier plus a key (Alt+H, Ctrl+Shift+K) or an F-key; empty turns it off. Enter to save."
           value={general.hotkey_toggle}
           onChange={(v) => onSet('general.hotkey_toggle', v)} />
         <Toggle label="Launch on system startup"

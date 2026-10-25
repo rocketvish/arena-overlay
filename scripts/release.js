@@ -11,7 +11,14 @@
  * With a draft already there, both upload into it (see electron-publish's
  * getOrCreateRelease).
  *
- * Requires the GitHub CLI (`gh auth login`).
+ * Requires the GitHub CLI (`gh auth login`) for the release API calls, and
+ * GH_TOKEN for electron-builder's upload: a fine-grained token for this repo
+ * only (Contents: read and write). It's handed to electron-builder and every
+ * package it runs, so it should not be your all-repos gh token. To use that
+ * anyway, pass --use-gh-auth-token.
+ *
+ * Before publishing, every uploaded file is compared with the local build by
+ * SHA-256 (GitHub's asset digest), so what users download is what was built.
  */
 'use strict';
 
@@ -27,6 +34,7 @@ const tag = `v${pkg.version}`;
 
 const args = process.argv.slice(2);
 const notesFile = args.includes('--notes') ? args[args.indexOf('--notes') + 1] : null;
+const useGhAuthToken = args.includes('--use-gh-auth-token');
 
 const sh = (cmd, cmdArgs, opts = {}) => execFileSync(cmd, cmdArgs, { cwd: root, encoding: 'utf-8', ...opts }).trim();
 const run = (cmd, cmdArgs, env = {}) => {
@@ -41,8 +49,22 @@ function releasesForTag() {
     .filter((r) => r.tag_name === tag);
 }
 
+/** Release assets must match the local build byte for byte (GitHub's sha256 digest). */
+function verifyAssets(rel, files) {
+  for (const [name, file] of files) {
+    const asset = rel.assets.find((a) => a.name === name);
+    if (!asset) throw new Error(`release is missing ${name}`);
+    const local = `sha256:${crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')}`;
+    if (!asset.digest) throw new Error(`GitHub reports no digest for ${name}; can't verify the upload`);
+    if (asset.digest !== local) throw new Error(`uploaded ${name} differs from the local build (${asset.digest} vs ${local})`);
+  }
+}
+
 function main() {
   step(`Checks for ${tag}`);
+  if (!process.env.GH_TOKEN && !useGhAuthToken) {
+    throw new Error('Set GH_TOKEN to a fine-grained token for this repo (Contents: read and write), or pass --use-gh-auth-token.');
+  }
   if (sh('git', ['status', '--porcelain'])) throw new Error('Working tree has uncommitted changes — commit first.');
   const head = sh('git', ['rev-parse', 'HEAD']);
   if (sh('git', ['rev-parse', 'origin/master']) !== head) throw new Error('HEAD is not pushed to origin/master — push first.');
@@ -63,7 +85,7 @@ function main() {
 
   step('Package and upload');
   run('npx', ['electron-builder', '--win', '--publish=always'], {
-    GH_TOKEN: process.env.GH_TOKEN || gh('auth', 'token'),
+    GH_TOKEN: process.env.GH_TOKEN || gh('auth', 'token'), // --use-gh-auth-token (checked above)
     CSC_IDENTITY_AUTO_DISCOVERY: 'false',
   });
 
@@ -82,15 +104,23 @@ function main() {
   const localExe = path.join(outDir, `${pkg.build.productName} Setup ${pkg.version}.exe`);
   const got = crypto.createHash('sha512').update(fs.readFileSync(localExe)).digest('base64');
   if (got !== want) throw new Error('local installer does not match latest.yml');
-  const uploaded = rel.assets.find((a) => a.name === exeName);
-  if (uploaded.size !== fs.statSync(localExe).size) throw new Error('uploaded installer size differs from local build');
-  console.log(`  one release, ${names.length} assets, installer checksum matches latest.yml`);
+  const files = [
+    [exeName, localExe],
+    [`${exeName}.blockmap`, `${localExe}.blockmap`],
+    ['latest.yml', path.join(outDir, 'latest.yml')],
+  ];
+  verifyAssets(rel, files);
+  console.log(`  one release, ${names.length} assets, installer checksum matches latest.yml, uploads match the local build`);
 
   if (!notesFile) {
     console.log(`\nDraft ready: ${rel.html_url}\nPublish with: npm run release -- --notes <file>   (or edit it on GitHub)`);
     return;
   }
   step('Publish');
+  // Once more right before it goes live: nothing swapped while it was a draft.
+  const [fresh] = releasesForTag();
+  if (!fresh || fresh.id !== rel.id) throw new Error('the draft release changed — check it on GitHub');
+  verifyAssets(fresh, files);
   gh('api', '-X', 'PATCH', `repos/${owner}/${repo}/releases/${rel.id}`,
     '-f', `tag_name=${tag}`, '-f', `target_commitish=${head}`,
     '-F', `body=@${path.resolve(notesFile)}`, '-F', 'draft=false', '-f', 'make_latest=true');

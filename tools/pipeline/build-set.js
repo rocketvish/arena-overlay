@@ -61,18 +61,35 @@ function parseArgs(argv) {
     else if (!args.set) args.set = a.toUpperCase();
   }
   if (!args.set) throw new Error('usage: build-set.js SET [--format PremierDraft] [--cache DIR] [--out DIR]');
+  // Both go into the download URL and cache file names.
+  if (!/^[A-Z0-9]{2,8}$/.test(args.set)) throw new Error(`invalid set code: ${args.set}`);
+  if (!/^[A-Za-z0-9]{1,32}$/.test(String(args.format))) throw new Error(`invalid format: ${args.format}`);
   return args;
 }
 
-function request(url, { method = 'GET' } = {}) {
+// Downloads only go to 17Lands' public bucket (or the regional S3 endpoint it
+// may redirect to), over https on every hop.
+const DATASET_HOST = /^17lands-public\.s3(\.[a-z0-9-]+)?\.amazonaws\.com$/;
+const MAX_REDIRECTS = 3;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000; // whole file
+const MAX_DOWNLOAD_BYTES = 2 * 1024 ** 3;
+
+function request(url, { method = 'GET', redirects = MAX_REDIRECTS } = {}) {
   return new Promise((resolve, reject) => {
-    https.request(url, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
+    let u;
+    try { u = new URL(url); } catch { return reject(new Error(`bad URL: ${url}`)); }
+    if (u.protocol !== 'https:' || !DATASET_HOST.test(u.hostname)) return reject(new Error(`refusing to fetch ${u.protocol}//${u.host}`));
+    const req = https.request(u, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return resolve(request(res.headers.location, { method }));
+        if (redirects <= 0) return reject(new Error(`too many redirects for ${url}`));
+        return resolve(request(new URL(res.headers.location, u).href, { method, redirects: redirects - 1 }));
       }
       resolve(res);
-    }).on('error', reject).end();
+    });
+    req.on('error', reject);
+    req.setTimeout(60000, () => req.destroy(new Error(`no data for 60s from ${u.host}`)));
+    req.end();
   });
 }
 
@@ -86,14 +103,42 @@ async function ensureDataset(kind, set, format, cacheDir) {
   const size = Number(head.headers['content-length']);
   const modified = head.headers['last-modified'] ?? null;
   if (fs.existsSync(file) && fs.statSync(file).size === size) return { file, modified };
+  if (size > MAX_DOWNLOAD_BYTES) throw new Error(`${kind} for ${set} ${format} is ${size} bytes, over the ${MAX_DOWNLOAD_BYTES}-byte cap`);
   fs.mkdirSync(cacheDir, { recursive: true });
   process.stdout.write(`  downloading ${kind} (${(size / 1e6).toFixed(0)} MB)… `);
   const res = await request(url);
+  if (res.statusCode !== 200) {
+    res.resume();
+    throw new Error(`${kind} for ${set} ${format}: download failed (HTTP ${res.statusCode})`);
+  }
+  const expected = Number(res.headers['content-length']);
   await new Promise((resolve, reject) => {
     const out = fs.createWriteStream(file + '.part');
+    let bytes = 0, settled = false;
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      res.destroy();
+      out.destroy();
+      reject(e);
+    };
+    const timer = setTimeout(() => fail(new Error(`${kind} download timed out after ${DOWNLOAD_TIMEOUT_MS / 60000} min`)), DOWNLOAD_TIMEOUT_MS);
+    res.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > MAX_DOWNLOAD_BYTES) fail(new Error(`${kind} download exceeded ${MAX_DOWNLOAD_BYTES} bytes`));
+    });
     res.pipe(out);
-    out.on('finish', resolve);
-    res.on('error', reject);
+    out.on('finish', () => {
+      if (settled) return;
+      if (Number.isFinite(expected) && bytes !== expected) return fail(new Error(`${kind} download truncated (${bytes}/${expected} bytes)`));
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    });
+    res.on('error', fail);
+    res.on('aborted', () => fail(new Error(`${kind} download aborted`)));
+    out.on('error', fail);
   });
   fs.renameSync(file + '.part', file);
   console.log('done');

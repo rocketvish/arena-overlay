@@ -50,7 +50,8 @@ async function scryfallSet(set) {
   while (url) {
     const page = await fetchJSON(url);
     for (const c of page.data ?? []) out[normCardName(c.name)] = scryfallEntry(c);
-    url = page.has_more ? page.next_page : null;
+    // Only follow pagination that stays on Scryfall's API.
+    url = page.has_more && /^https:\/\/api\.scryfall\.com\//.test(page.next_page ?? '') ? page.next_page : null;
     if (url) await sleep(120); // Scryfall asks for ≤ 10 requests/second
   }
   return out;

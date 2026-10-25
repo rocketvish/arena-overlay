@@ -171,6 +171,84 @@ test('a human draft with no EventJoin recognises its set from the cards', () => 
   }
 });
 
+// ── Hostile / malformed log lines ────────────────────────────────────────────
+const { getStats } = require('../src/main/logWatcher');
+const statusResponse = (payload) =>
+  `<== BotDraftDraftStatus(x)\r\n${JSON.stringify({ CurrentModule: 'BotDraft', Payload: JSON.stringify(payload) })}\r\n`;
+const pickNext = (extra) => ({ DraftStatus: 'PickNext', PackNumber: 0, PickNumber: 0, ...extra });
+/** Run text and also report how many lines the parser had to give up on. */
+function runCounted(text) {
+  const before = getStats().parseFailures;
+  const evs = runChunked(text, 4096);
+  return { evs, failures: getStats().parseFailures - before };
+}
+
+test('a huge PickNumber does not set a huge packSize', () => {
+  const evs = runChunked(
+    statusResponse(pickNext({ PickNumber: 1e9, DraftPack: ['1', '2', '3'] })) +
+    '[UnityCrossThreadLogger]Draft.Notify {"draftId":"d","SelfPick":999999999,"SelfPack":1,"PackCards":"1,2"}\r\n',
+    4096);
+  for (const p of byChannel(evs, 'pack-opened')) {
+    assert.ok(p.data.packSize == null || p.data.packSize <= 20, `packSize ${p.data.packSize}`);
+    assert.ok(p.data.pickNumber <= 19, `pickNumber ${p.data.pickNumber}`);
+  }
+});
+
+test('null pack entries and a non-array PackCards do not throw', () => {
+  const { evs, failures } = runCounted(
+    statusResponse(pickNext({ DraftPack: [null, '11', 12, null] })) +
+    '[UnityCrossThreadLogger]Draft.Notify {"draftId":"d","SelfPick":2,"SelfPack":1,"PackCards":{"length":3}}\r\n' +
+    '[UnityCrossThreadLogger]Draft.Notify {"draftId":"d","SelfPick":3,"SelfPack":1,"PackCards":7}\r\n' +
+    '<== EventGetCoursesV2(x)\r\n{"Courses":[null,{"CardPool":5}]}\r\n' +
+    '<== BotDraftDraftStatus(x)\r\nnull\r\n' +
+    '[UnityCrossThreadLogger]==> BotDraftDraftPick {"id":"x","request":"null"}\r\n');
+  assert.strictEqual(failures, 0, 'a guard was missing and the catch-all fired');
+  const packs = byChannel(evs, 'pack-opened');
+  assert.strictEqual(packs.length, 1);
+  assert.deepStrictEqual(packs[0].data.cards.map(c => c.grpId), [11, 12]);
+});
+
+test('an object pack entry keeps a numeric grpId', () => {
+  const evs = runChunked(statusResponse(pickNext({ DraftPack: [{ grpId: '123', name: 'x' }, { CardId: '7' }] })), 4096);
+  const cards = byChannel(evs, 'pack-opened')[0].data.cards;
+  assert.deepStrictEqual(cards.map(c => c.grpId), [123, 7]);
+  assert.strictEqual(cards[0].name, 'x');
+});
+
+test('an event name like constructor_FRA_x does not yield a function format', () => {
+  const evs = runChunked(statusResponse(pickNext({ EventName: 'constructor_FRA_x', DraftPack: ['1', '2'] })), 4096);
+  const start = byChannel(evs, 'draft-started')[0].data;
+  assert.strictEqual(start.format, null);
+  assert.strictEqual(start.setCode, 'FRA');
+});
+
+test('a throwing handler is contained by parseLine', () => {
+  const { log, warn } = console;
+  console.log = console.warn = () => {};
+  try {
+    logParser.reset();
+    const boom = () => { throw new Error('boom'); };
+    logParser.parseLine('[UnityCrossThreadLogger]Draft.Notify {"draftId":"d","SelfPick":1,"SelfPack":1,"PackCards":"1,2"}', boom);
+    logParser.parseLine(undefined, boom);
+  } finally {
+    logParser.setBroadcast(null);
+    console.log = log; console.warn = warn;
+  }
+});
+
+test('an unterminated JSON body is dropped once the cap is reached', () => {
+  const body = (padLines) => [
+    '<== BotDraftDraftStatus(x)',
+    `{"CurrentModule":"BotDraft","Payload":${JSON.stringify(JSON.stringify(pickNext({ DraftPack: ['1', '2', '3'] })))},`,
+    '"pad":[',
+    ...Array(padLines).fill('1,'),
+    '1]}',
+  ].join('\r\n') + '\r\n';
+  // Control: a short multi-line body still completes and opens the pack.
+  assert.strictEqual(byChannel(runChunked(body(10), 4096), 'pack-opened').length, 1);
+  assert.strictEqual(byChannel(runChunked(body(2500), 4096), 'pack-opened').length, 0);
+});
+
 // ── Integration: the real watcher's startup scan, mid-Premier-draft ──────────
 async function watcherStartupScan() {
   const os = require('os');

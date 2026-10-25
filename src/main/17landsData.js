@@ -292,18 +292,24 @@ const RARITY_MAP = {
   COMMON: 'common', UNCOMMON: 'uncommon', RARE: 'rare', MYTHIC: 'mythic',
 };
 
+// 17Lands responses are type-checked as they're read: names are rendered and
+// string-processed, stats feed arithmetic.
+const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+const str = (x, max = 200) => (typeof x === 'string' ? x.slice(0, max) : '');
+
 function normalizeCard(c, index, g) {
+  const mtgaId = num(c.mtga_id);
   return {
-    name: c.name,
-    mtgaId: c.mtga_id ?? null, // Arena grpId — present in 17Lands raw data
-    color: c.color ?? '',
-    rarity: RARITY_MAP[(c.rarity ?? '').toUpperCase()] ?? 'common',
+    name: str(c.name),
+    mtgaId: Number.isSafeInteger(mtgaId) && mtgaId > 0 ? mtgaId : null, // Arena grpId — present in 17Lands raw data
+    color: str(c.color, 10),
+    rarity: (Object.hasOwn(RARITY_MAP, str(c.rarity, 20).toUpperCase()) && RARITY_MAP[str(c.rarity, 20).toUpperCase()]) || 'common',
     // 17Lands doesn't provide mana value or rules text; attachCardText()
     // fills cmc / manaCost / oracleText from Scryfall. typeLine starts from
     // 17Lands' own `types` so creature/removal checks work even offline.
     cmc: null,
     manaCost: null,
-    typeLine: Array.isArray(c.types) ? c.types.join(' // ') : '',
+    typeLine: Array.isArray(c.types) ? c.types.filter((t) => typeof t === 'string').join(' // ').slice(0, 200) : '',
     oracleText: '',
     // Position in the 17Lands data array ≈ collector number − 1.
     // Used by the overlay to reproduce Arena's visual pack sort order
@@ -313,24 +319,25 @@ function normalizeCard(c, index, g) {
       grade: g.grade,
       gradeEstimated: g.gradeEstimated,
       z: g.z,
-      gihwr: c.ever_drawn_win_rate ?? null,
+      gihwr: num(c.ever_drawn_win_rate),
       gihwrEst: g.gihwrEst,
-      ohwr: c.opening_hand_win_rate ?? null,
-      gpwr: c.win_rate ?? null,
-      alsa: c.avg_seen ?? null,       // average last seen at (pick #, 1-based)
-      ata: c.avg_pick ?? null,        // average taken at (pick #, 1-based)
-      iwd: c.drawn_improvement_win_rate ?? null,
-      playRate: c.play_rate ?? null,
-      sampleSize: c.ever_drawn_game_count ?? 0, // drawn games (GIH sample)
-      gameCount: c.game_count ?? 0,             // games in deck (GP sample)
+      ohwr: num(c.opening_hand_win_rate),
+      gpwr: num(c.win_rate),
+      alsa: num(c.avg_seen),       // average last seen at (pick #, 1-based)
+      ata: num(c.avg_pick),        // average taken at (pick #, 1-based)
+      iwd: num(c.drawn_improvement_win_rate),
+      playRate: num(c.play_rate),
+      sampleSize: num(c.ever_drawn_game_count) ?? 0, // drawn games (GIH sample)
+      gameCount: num(c.game_count) ?? 0,             // games in deck (GP sample)
       lowSample: g.lowSample,
     },
   };
 }
 
 function buildCardData(raw) {
-  const grades = computeGrades(raw);
-  return raw.map((c, i) => normalizeCard(c, i, grades[i]));
+  const rows = Array.isArray(raw) ? raw.filter((c) => c && typeof c === 'object') : [];
+  const grades = computeGrades(rows);
+  return rows.map((c, i) => normalizeCard(c, i, grades[i]));
 }
 
 function totalGames(cards) {
@@ -347,7 +354,7 @@ function totalGames(cards) {
 const TEXT_RETRY_MS = 24 * 60 * 60 * 1000;
 
 function normName(name) {
-  return (name ?? '')
+  return (typeof name === 'string' ? name : '')
     .split(' // ')[0]
     .toLowerCase()
     .normalize('NFD')
@@ -400,8 +407,9 @@ async function fetchScryfallByName(names) {
 async function attachCardText(setCode, cards) {
   const key = `scryfall-text-${setCode}`;
   const entry = readCacheEntry(key) ?? { fetchedAt: 0, byName: {}, misses: {} };
-  const byName = entry.byName ?? {};
-  const misses = entry.misses ?? {};
+  // Null-prototype maps: card names are keys ("constructor" must not hit Object.prototype).
+  const byName = Object.assign(Object.create(null), entry.byName ?? {});
+  const misses = Object.assign(Object.create(null), entry.misses ?? {});
   const now = Date.now();
   const wanted = cards.filter((c) => {
     const n = normName(c.name);

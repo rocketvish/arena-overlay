@@ -24,15 +24,36 @@ const REMOTE = 'https://github.com/rocketvish/arena-overlay/releases/download/se
 const FORMAT = 'PremierDraft';
 const NEWEST = 8;
 
+// Every hop must be https to one of these: 17Lands (site + public dataset
+// bucket, incl. a regional S3 redirect) and GitHub release downloads, which
+// redirect to its asset CDN.
+const ALLOWED_HOSTS = [
+  /^www\.17lands\.com$/,
+  /^17lands-public\.s3(\.[a-z0-9-]+)?\.amazonaws\.com$/,
+  /^github\.com$/,
+  /^(release-assets|objects)\.githubusercontent\.com$/,
+];
+const MAX_REDIRECTS = 3;
+const MAX_BODY_BYTES = 64 * 1024 * 1024; // set tables are ~200 KB
+
 function getOnce(url, method, redirects) {
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
+    let u;
+    try { u = new URL(url); } catch { return reject(new Error(`bad URL: ${url}`)); }
+    if (u.protocol !== 'https:' || !ALLOWED_HOSTS.some((h) => h.test(u.hostname))) return reject(new Error(`refusing to fetch ${u.protocol}//${u.host}`));
+    const req = https.request(u, { method, headers: { 'User-Agent': 'ArenaOverlay-pipeline' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return resolve(getOnce(res.headers.location, method, redirects - 1));
+        if (redirects <= 0) return reject(new Error(`too many redirects for ${url}`));
+        return resolve(getOnce(new URL(res.headers.location, u).href, method, redirects - 1));
       }
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let bytes = 0;
+      res.on('data', (c) => {
+        bytes += c.length;
+        if (bytes > MAX_BODY_BYTES) req.destroy(new Error(`response over ${MAX_BODY_BYTES} bytes from ${u.host}`));
+        else chunks.push(c);
+      });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8') }));
       res.on('error', reject);
     });
@@ -47,7 +68,7 @@ async function get(url, method = 'GET') {
   let lastErr;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const r = await getOnce(url, method, 4);
+      const r = await getOnce(url, method, MAX_REDIRECTS);
       if (r.status < 500) return r;
       lastErr = new Error(`HTTP ${r.status} for ${url}`);
     } catch (e) {
@@ -150,4 +171,4 @@ async function main() {
   if (r.status !== 0) process.exitCode = 1;
 }
 
-main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });
+if (require.main === module) main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });

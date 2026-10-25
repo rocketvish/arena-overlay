@@ -45,23 +45,30 @@ function isAllowedExternalUrl(rawUrl) {
 }
 
 /** No popups, no navigation away from our page (dev: same-origin reloads only). */
-function hardenWindow(win) {
-  win.webContents.setWindowOpenHandler(({ url }) => {
+function hardenContents(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (event, url) => {
+  contents.on('will-navigate', (event, url) => {
     if (isDev && isTrustedAppUrl(url)) return;
     event.preventDefault();
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
   });
-  win.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.on('will-attach-webview', (event) => event.preventDefault());
 }
 
-/** App-wide: refuse every browser permission request (camera, notifications, …). */
+const hardenWindow = (win) => hardenContents(win.webContents);
+
+/**
+ * App-wide: refuse every browser permission request (camera, notifications,
+ * …), and harden every web contents as it's created — not just the windows
+ * passed to hardenWindow.
+ */
 function hardenSessions() {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
+  app.on('web-contents-created', (_event, contents) => hardenContents(contents));
 }
 
 const WEB_PREFERENCES = {
@@ -70,6 +77,7 @@ const WEB_PREFERENCES = {
   sandbox: true,
   webSecurity: true,
   spellcheck: false,
+  devTools: isDev,
 };
 
 module.exports = { isDev, DEV_ORIGIN, isTrustedAppUrl, isAllowedExternalUrl, hardenWindow, hardenSessions, WEB_PREFERENCES };

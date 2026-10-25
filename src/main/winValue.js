@@ -37,6 +37,7 @@ const DEFAULT_TAU = 0.15;
 // so a card a bit below average still beats the weaker future draws.
 const SPREAD = [0, Math.sqrt(1.5), -Math.sqrt(1.5)];
 const SWAP_CANDIDATES = 10;   // lowest deck slots tried when a card comes in
+const MAX_UNITS = 200;        // pool + future picks never come close (45 picks)
 
 /** Bitmask of the pairs a card of `color` can be cast in. */
 function castMask(color) {
@@ -60,12 +61,18 @@ function cardMask(card) {
 
 const traitVector = (bits) => SHAPE.map((_, j) => ((bits >> j) & 1));
 
+// Log-odds per card or deck term: real values are well under 1.
+const VALUE_LIMIT = 5;
+
 /** Index the table's value block. Returns null when the table has none. */
 function prepareValue(table) {
   const v = table?.value;
   // Shape checks so a corrupt table can't blow up the main process (real
   // blocks: a few hundred cards, 3 × 14–15 picks).
+  // Values are clamped to sane ranges too: a castable rate of 1e12 would make
+  // deckUnits push a deck slot per unit and hang the process.
   const nums = (arr, max) => Array.isArray(arr) && arr.length <= max && arr.every((x) => typeof x === 'number' && Number.isFinite(x));
+  const clamp = (x, lo, hi) => (typeof x === 'number' && Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : 0);
   if (!v || !Array.isArray(v.ids) || v.ids.length === 0 || v.ids.length > 5000 || !nums(v.w, 5000) || v.ids.length !== v.w.length) return null;
   if (!nums(v.pairBias, PAIRS.length) || v.pairBias.length !== PAIRS.length) return null;
   if (!v.phantom || !PAIRS.every((p) => nums(v.phantom[p]?.value, 60) && nums(v.phantom[p]?.castable, 60) && v.phantom[p].value.length === v.phantom[PAIRS[0]].value.length)) return null;
@@ -73,9 +80,10 @@ function prepareValue(table) {
   v.ids.forEach((id, i) => {
     const w = v.w[i];
     if (typeof w !== 'number' || !Number.isFinite(w)) return;
-    cards.set(id, { w, mask: cardMask(table.cards?.[id]), a: traitVector(v.traits?.[i] ?? 0) });
+    cards.set(id, { w: clamp(w, -VALUE_LIMIT, VALUE_LIMIT), mask: cardMask(table.cards?.[id]), a: traitVector(v.traits?.[i] ?? 0) });
   });
-  const knots = (list) => (Array.isArray(list) ? list.slice(0, 10).filter((h) => Array.isArray(h) && h.length === 2 && h.every(Number.isFinite)) : []);
+  const knots = (list) => (Array.isArray(list) ? list.slice(0, 10).filter((h) => Array.isArray(h) && h.length === 2 && h.every(Number.isFinite))
+    .map(([k, w]) => [clamp(k, 0, 60), clamp(w, -VALUE_LIMIT, VALUE_LIMIT)]) : []);
   const structure = SHAPE.map((name) => {
     const s = v.structure?.[name];
     return s ? { short: knots(s.short), over: knots(s.over) } : null;
@@ -83,21 +91,21 @@ function prepareValue(table) {
   const picks = v.phantom[PAIRS[0]].value.length;
   return {
     cards,
-    pairBias: v.pairBias,
+    pairBias: v.pairBias.map((x) => clamp(x, -VALUE_LIMIT, VALUE_LIMIT)),
     structure,
     phantom: PAIRS.map((p) => {
       const ph = v.phantom[p];
-      const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
       const traits = SHAPE.map((_, j) => (Array.isArray(ph.traits?.[j]) ? ph.traits[j] : null));
       return {
-        value: ph.value, castable: ph.castable,
-        sd: Array.from({ length: picks }, (_, t) => num(ph.sd?.[t])),
-        unitTraits: Array.from({ length: picks }, (_, t) => traits.map((arr) => num(arr?.[t]))),
+        value: ph.value.map((x) => clamp(x, -VALUE_LIMIT, VALUE_LIMIT)),
+        castable: ph.castable.map((x) => clamp(x, 0, 1)),
+        sd: Array.from({ length: picks }, (_, t) => clamp(ph.sd?.[t], 0, VALUE_LIMIT)),
+        unitTraits: Array.from({ length: picks }, (_, t) => traits.map((arr) => clamp(arr?.[t], 0, 1))),
       };
     }),
-    filler: Number.isFinite(v.filler) ? v.filler : 0,
+    filler: clamp(v.filler, -VALUE_LIMIT, VALUE_LIMIT),
     picks,
-    toPct: Number.isFinite(v.toPct) ? v.toPct : 25,
+    toPct: Number.isFinite(v.toPct) && v.toPct > 0 && v.toPct <= 100 ? v.toPct : 25,
   };
 }
 
@@ -144,7 +152,7 @@ function deckUnits(vt, pool, p, nextPick, shift = 0, splash = null) {
       at = Math.round(src);
     }
     mass += castable > 0 ? castable : 0;
-    while (mass >= 1) {
+    while (mass >= 1 && units.length < MAX_UNITS) {
       mass -= 1;
       units.push({ w: value + SPREAD[k++ % SPREAD.length] * ph.sd[at], a: ph.unitTraits[at] });
     }

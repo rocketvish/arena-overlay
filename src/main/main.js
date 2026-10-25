@@ -31,6 +31,14 @@ const hotkeyStatus = { toggle: null }; // { key, ok }
 const DRAFT_FORMATS = new Set(['PremierDraft', 'QuickDraft', 'TradDraft', 'Sealed']);
 const COLOR_PAIRS = new Set(['W', 'U', 'B', 'R', 'G', 'WU', 'WB', 'WR', 'WG', 'UB', 'UR', 'UG', 'BR', 'BG', 'RG']);
 
+const HOTKEY_FKEY = 'F(?:[1-9]|1[0-9]|2[0-4])';
+const HOTKEY_RE = new RegExp(
+  '^(?:(?:CommandOrControl|CmdOrCtrl|Control|Ctrl|Alt|Option|AltGr|Shift|Super|Meta)\\+)+'
+  + `(?:[A-Za-z0-9]|${HOTKEY_FKEY}|Space|Tab|Up|Down|Left|Right|Home|End|PageUp|PageDown|Insert|Delete|Backspace|Plus)$`
+  + `|^${HOTKEY_FKEY}$`,
+  'i',
+);
+
 const SETTING_VALIDATORS = {
   'window.alwaysOnTop': (v) => typeof v === 'boolean',
   'columns.win': (v) => typeof v === 'boolean',
@@ -55,7 +63,9 @@ const SETTING_VALIDATORS = {
   // Local paths only: a UNC/device path (\\host\share, \\?\…) would make the
   // app reach out over SMB and could leak the user's Windows credentials.
   'general.arenaLogPath': (v) => typeof v === 'string' && v.length > 0 && v.length <= 1000 && !v.includes('\0') && !/^[\\/]{2}/.test(v.trim()),
-  'general.hotkey_toggle': (v) => typeof v === 'string' && v.length <= 100,
+  // A global shortcut swallows its key in every app (Arena included), so it
+  // needs a modifier, or is a bare F-key. '' turns the hotkey off.
+  'general.hotkey_toggle': (v) => typeof v === 'string' && (v === '' || HOTKEY_RE.test(v)),
   'general.autoLaunch': (v) => typeof v === 'boolean',
   'general.runOnStartup': (v) => typeof v === 'boolean',
   'general.minimizeToTray': (v) => typeof v === 'boolean',

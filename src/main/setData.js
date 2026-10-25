@@ -54,8 +54,9 @@ function readTableFile(fp) {
 }
 
 const MAX_TABLE_BYTES = 8 * 1024 * 1024; // real tables are ~100–200 KB
-// GitHub release downloads redirect to its asset CDN; nothing else is followed.
-const ALLOWED_HOSTS = /^(github\.com|[a-z0-9-]+\.githubusercontent\.com)$/;
+// GitHub release downloads redirect to its asset CDN (release-assets today,
+// objects before); nothing else is followed — not raw. or other user content.
+const ALLOWED_HOSTS = /^(github\.com|release-assets\.githubusercontent\.com|objects\.githubusercontent\.com)$/;
 
 function download(url, redirects = 3) {
   return new Promise((resolve, reject) => {
@@ -95,12 +96,55 @@ function validModel(m) {
     [m.b, m.u, m.v].every((arr) => arr.every((x) => typeof x === 'number' && Number.isFinite(x)));
 }
 
+// ─── Per-card records ─────────────────────────────────────────────────────────
+// Card entries are type-checked field by field: the analyzer destructures
+// pairs, calls string methods on names and renders names in the window, so a
+// wrong type in a downloaded table would throw on every pack of that set.
+
+const finOrNull = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+const isPairs = (o) => o && typeof o === 'object' && !Array.isArray(o);
+/** { key: [n, n, …] } with only all-finite arrays of length `len` kept. */
+function numTuples(o, len) {
+  if (!isPairs(o)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (/^[WUBRG]{1,5}$/.test(k) && Array.isArray(v) && v.length === len && v.every((x) => Number.isFinite(x))) out[k] = v;
+  }
+  return out;
+}
+function sanitizeCard(c) {
+  if (!c || typeof c !== 'object' || typeof c.name !== 'string' || !c.name || c.name.length > 200) return null;
+  const out = {
+    name: c.name,
+    color: typeof c.color === 'string' ? c.color.replace(/[^WUBRG]/g, '').slice(0, 5) : '',
+    rarity: typeof c.rarity === 'string' ? c.rarity.slice(0, 20) : 'common',
+    types: Array.isArray(c.types) ? c.types.filter((t) => typeof t === 'string').slice(0, 10).map((t) => t.slice(0, 100)) : [],
+    order: finOrNull(c.order),
+    pairs: numTuples(c.pairs, 2),
+    deck: numTuples(c.deck, 2),
+    wheel: Array.isArray(c.wheel) ? c.wheel.slice(0, 10).map(finOrNull) : [],
+  };
+  for (const k of ['gih', 'gihN', 'oh', 'ohN', 'gp', 'gpN', 'gns', 'ata']) out[k] = finOrNull(c[k]);
+  if (Array.isArray(c.incl) && c.incl.length === 3 && c.incl.every((x) => Number.isFinite(x))) out.incl = c.incl;
+  return out;
+}
+function sanitizeCards(raw) {
+  const out = {};
+  if (!isPairs(raw)) return out;
+  for (const [id, c] of Object.entries(raw)) {
+    if (!/^[0-9]{1,9}$/.test(id)) continue;
+    const s = sanitizeCard(c);
+    if (s) out[id] = s;
+  }
+  return out;
+}
+
 /** Index the raw table for fast lookups. */
 function prepare(raw, fetchedAt) {
   const m = validModel(raw.model) ? raw.model : null;
   const modelIndex = new Map();
   if (m) m.ids.forEach((id, i) => modelIndex.set(id, i));
-  const cards = raw.cards && typeof raw.cards === 'object' && !Array.isArray(raw.cards) ? raw.cards : {};
+  const cards = sanitizeCards(raw.cards);
   let valueTable = null;
   try { valueTable = winValue.prepareValue({ ...raw, cards }); } catch { valueTable = null; }
   return { ...raw, cards, model: m, fetchedAt, modelIndex, valueTable };
@@ -179,10 +223,12 @@ const finiteArr = (a, n) => Array.isArray(a) && a.length === n && a.every(finite
 function validPrior(p) {
   const ph = p?.phantom;
   const n = ph?.valueZ?.length;
-  if (!finite(p?.wPerZ) || p.wPerZ <= 0 || p.wPerZ > 1 || !finite(p.fillerZ) || !finite(p.pairSlope)) return false;
-  if (!Number.isInteger(n) || n < 30 || n > 60) return false;
-  if (!finiteArr(ph.sdZ, n) || !finiteArr(ph.castable, n) || !Array.isArray(ph.traits) || !ph.traits.every((t) => finiteArr(t, n))) return false;
-  return !!p.structure && Object.values(p.structure).every((s) =>
+  const within = (a, lo, hi) => a.every((x) => x >= lo && x <= hi);
+  if (!finite(p?.wPerZ) || p.wPerZ <= 0 || p.wPerZ > 1 || !finite(p.fillerZ) || Math.abs(p.fillerZ) > 10 || !finite(p.pairSlope) || Math.abs(p.pairSlope) > 5) return false;
+  if (!Number.isInteger(n) || n < 30 || n > 60 || !finiteArr(ph.valueZ, n) || !within(ph.valueZ, -10, 10)) return false;
+  if (!finiteArr(ph.sdZ, n) || !within(ph.sdZ, 0, 10) || !finiteArr(ph.castable, n) || !within(ph.castable, 0, 1)) return false;
+  if (!Array.isArray(ph.traits) || ph.traits.length > 8 || !ph.traits.every((t) => finiteArr(t, n) && within(t, 0, 1))) return false;
+  return !!p.structure && typeof p.structure === 'object' && Object.keys(p.structure).length <= 8 && Object.values(p.structure).every((s) =>
     ['short', 'over'].every((k) => Array.isArray(s?.[k]) && s[k].length <= 10 && s[k].every((h) => Array.isArray(h) && h.length === 2 && h.every(finite))));
 }
 
