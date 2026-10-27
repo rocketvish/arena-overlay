@@ -61,6 +61,18 @@ console.log('\nParser / watcher regression tests');
 
 const events = runChunked(fixture, 1 << 20);
 
+test('Alchemy set codes map to their base set for data', () => {
+  const { alchemyBase, dataSetFor } = require('../src/main/setCodes');
+  assert.strictEqual(alchemyBase('YFRA'), 'FRA');      // Arena's event code
+  assert.strictEqual(alchemyBase('Y26FRA'), 'FRA');    // 17Lands' code
+  assert.strictEqual(alchemyBase('FRA'), null);
+  assert.strictEqual(alchemyBase('OM1'), null);
+  assert.strictEqual(dataSetFor('YFRA'), 'FRA');
+  assert.strictEqual(dataSetFor('HOB'), 'HOB');
+  const { extractEventInfo } = require('../src/main/logParser');
+  if (extractEventInfo) assert.strictEqual(extractEventInfo('PremierDraft_YFRA_20261013').setCode, 'YFRA');
+});
+
 test('fixture really uses CRLF line endings', () => {
   assert.ok(fixture.includes('\r\n'), 'expected CRLF in fixture');
 });

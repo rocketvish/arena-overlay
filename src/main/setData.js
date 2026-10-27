@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const winValue = require('./winValue');
+const { dataSetFor } = require('./setCodes');
 
 const REMOTE_BASE = 'https://github.com/rocketvish/arena-overlay/releases/download/set-data';
 const TABLE_SCHEMA = 1;
@@ -165,6 +166,7 @@ function winScores(table, poolIds, packIds, pickIndex, opts) {
  */
 async function loadSetTable(setCode, { force = false } = {}) {
   if (typeof setCode !== 'string' || !SET_CODE_RE.test(setCode)) return null;
+  setCode = dataSetFor(setCode); // Alchemy (YFRA): the base set's table covers its cards
   const mem = tables.get(setCode);
   if (!force && mem && Date.now() - mem.fetchedAt < REFRESH_MS) return mem;
   if (inflight.has(setCode)) return inflight.get(setCode);

@@ -24,6 +24,7 @@ const { app } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { alchemyBase, dataSetFor } = require('./setCodes');
 
 // Lazy — must not call app.getPath() at module load time
 let CACHE_DIR = null;
@@ -460,7 +461,57 @@ async function attachCardText(setCode, cards) {
  *   { data: NormalizedCard[], fromCache, fetchedAt, stale?, staleReason? }
  *   { data: null, noData: true } | { data: null, error }
  */
-async function fetchSetData(setCode, _format = 'PremierDraft', win = null, { force = false } = {}) {
+/**
+ * Card ratings for a set. An Alchemy set (YFRA) gets its base set's cards
+ * and stats, plus its digital-only cards (names and types, no stats yet).
+ */
+async function fetchSetData(setCode, format = 'PremierDraft', win = null, opts = {}) {
+  const base = alchemyBase(setCode);
+  if (!base) return fetchSetRatings(setCode, win, opts);
+  const res = await fetchSetRatings(base, win, opts);
+  if (!res?.data) return res;
+  const extra = await alchemyExtras(setCode, base, res.data).catch((e) => {
+    console.warn('[17lands] Alchemy card list failed:', e.message);
+    return [];
+  });
+  return extra.length ? { ...res, data: [...res.data, ...extra] } : res;
+}
+
+const ALCHEMY_TTL_MS = 24 * 60 * 60 * 1000;
+const ALCHEMY_RETRY_MS = 60 * 60 * 1000;
+const NO_GRADE = { grade: null, gradeEstimated: false, z: null, gihwrEst: null, lowSample: true };
+
+/**
+ * The Alchemy set's cards that aren't in its base set, from 17Lands' listing
+ * (its code there has the year: Y26FRA). Cached a day; a failure is retried
+ * after an hour, not on every pack.
+ */
+async function alchemyExtras(setCode, base, baseCards) {
+  const key = `${setCode}_alchemy_cards`;
+  const cached = memCache.get(key) ?? readCacheEntry(key);
+  if (cached && Date.now() - cached.fetchedAt < (cached.failed ? ALCHEMY_RETRY_MS : ALCHEMY_TTL_MS)) return cached.cards ?? [];
+  try {
+    const expansions = await requestJSON('https://www.17lands.com/data/expansions');
+    const re = new RegExp(`^Y[0-9]{2}${base}$`);
+    const code = Array.isArray(expansions) ? expansions.find((e) => typeof e === 'string' && re.test(e)) : null;
+    const raw = code ? await requestJSON(`https://www.17lands.com/card_ratings/data?expansion=${encodeURIComponent(code)}&format=PremierDraft`) : [];
+    const have = new Set(baseCards.map((c) => c.mtgaId));
+    const cards = (Array.isArray(raw) ? raw : [])
+      .filter((c) => c && typeof c === 'object' && !have.has(c.mtga_id))
+      .map((c) => normalizeCard(c, null, NO_GRADE))
+      .filter((c) => c.mtgaId != null && c.name);
+    try { await attachCardText(setCode, cards); } catch { /* names and 17Lands types are enough */ }
+    const entry = { fetchedAt: Date.now(), cards, source: code };
+    memCache.set(key, entry);
+    writeCacheEntry(key, entry);
+    return cards;
+  } catch (e) {
+    memCache.set(key, { fetchedAt: Date.now(), cards: cached?.cards ?? [], failed: true });
+    throw e;
+  }
+}
+
+async function fetchSetRatings(setCode, win = null, { force = false } = {}) {
   const key = `${setCode}_PremierDraft`;
 
   if (!force) {
@@ -608,6 +659,7 @@ async function fromPublicDataset(setCode) {
  *           fetchedAt, totalGames } | null
  */
 async function fetchColorRatings(setCode, { force = false } = {}) {
+  setCode = dataSetFor(setCode); // Alchemy: the base set's archetypes
   const key = `${setCode}_color_ratings`;
   if (!force) {
     const mem = memCache.get(key);
@@ -676,6 +728,7 @@ const QUICK_MIN_PICKS = 100;   // per-card picks before its Quick Draft position
  * Returns { fetchedAt, cards: { [mtgaId]: { ata, alsa, picks } } }.
  */
 async function fetchQuickDraftStats(setCode, { force = false } = {}) {
+  setCode = dataSetFor(setCode);
   const key = `${setCode}_quickdraft_stats`;
   if (!force) {
     const mem = memCache.get(key);
