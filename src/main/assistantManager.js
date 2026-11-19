@@ -76,6 +76,8 @@ async function loadLandsMap(setCode) {
  * Card stats + archetype win rates + the per-set table derived from 17Lands'
  * public datasets (pick model, per-pair GIH WR, wheel rates) when published.
  */
+const THIN_PAIR_GAMES = 20000;
+
 async function loadSetMetrics(setCode, format = null) {
   const quickDraft = format === 'QuickDraft';
   const [cards, ratings, table, quick, prior] = await Promise.all([
@@ -88,8 +90,12 @@ async function loadSetMetrics(setCode, format = null) {
     setData.loadValuePrior().catch(() => null),
   ]);
   if (!cards) return null;
-  // Live 17Lands archetype data first; the public-data table can stand in.
-  const metrics = signalAnalyzer.computeSetMetrics(cards, ratings ?? (table?.pairs ? { pairs: table.pairs } : null));
+  // Live 17Lands archetype data first; the public-data table stands in when
+  // there's none, or only a thin sample (an old set rerun on Arena: a few days
+  // of games, where one pair can read 67% on 30 decks).
+  const thinRatings = !ratings || (ratings.totalGames ?? 0) < THIN_PAIR_GAMES;
+  const pairs = table?.pairs && thinRatings ? { pairs: table.pairs } : ratings;
+  const metrics = signalAnalyzer.computeSetMetrics(cards, pairs);
   metrics.table = table;
   metrics.bots = quick ? signalAnalyzer.computeBotProfile(cards, quick) : null;
   if (prior) metrics.valuePrior = prior;

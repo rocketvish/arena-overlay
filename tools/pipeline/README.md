@@ -185,7 +185,7 @@ then copy the printed weights into `WEIGHTS_MODEL` / `WEIGHTS_BASE` in `signalAn
 
 ## Automatic updates
 
-`.github/workflows/set-data.yml` runs daily: `update-sets.js` checks the 8 newest expansions,
+`.github/workflows/set-data.yml` runs daily: `update-sets.js` checks the 16 newest expansions (Arena reruns older sets as Premier and Quick drafts),
 compares 17Lands' dataset dates with the published tables, rebuilds what's new or changed and
 publishes. Whenever a table changes it also rebuilds the cross-set prior and publishes it as
 `valuePrior.json`, which the app downloads daily (the bundled copy is the fallback). Run it by hand from the Actions tab (optionally with set codes / force), or locally:

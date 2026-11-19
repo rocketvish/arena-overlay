@@ -42,6 +42,9 @@ const MIN_EST_GAMES = 100;                     // min GP games to estimate a gra
 const THIN_RESPONSE_RATIO = 0.5;               // fresh data with < 50% of cached games ⇒ keep cache
 const STALE_RETRY_MS = 60 * 60 * 1000;         // re-check a stale fallback at most hourly
 const FAILURE_RETRY_MS = 5 * 60 * 1000;        // don't re-request after an error / no-data for 5 min
+// A thin sample (old set rerun, brand-new set) is re-checked sooner, so a
+// set table published in the meantime replaces it within the hour.
+const THIN_TTL_MS = 30 * 60 * 1000;
 const RECENT_SNAPSHOT_MS = 7 * 24 * 60 * 60 * 1000; // thin-response guard only trusts snapshots this fresh
 // Below this many card-games in total a set's data can't grade anything — e.g.
 // a set that has left the live queue still returns a trickle (SOS: 192).
@@ -341,6 +344,14 @@ function buildCardData(raw) {
   return rows.map((c, i) => normalizeCard(c, i, grades[i]));
 }
 
+const MIN_GIH_COVERAGE = 0.5;
+
+/** Share of nonland cards with a measured GIH WR. */
+function gihCoverage(cards) {
+  const spells = cards.filter((c) => !/Land/.test(c.typeLine ?? ''));
+  return spells.length ? spells.filter((c) => c.stats?.gihwr != null).length / spells.length : 0;
+}
+
 function totalGames(cards) {
   return cards.reduce((s, c) => s + (c.stats?.gameCount ?? c.stats?.sampleSize ?? c.game_count ?? 0), 0);
 }
@@ -515,12 +526,13 @@ async function fetchSetRatings(setCode, win = null, { force = false } = {}) {
   const key = `${setCode}_PremierDraft`;
 
   if (!force) {
+    const thinExpired = (e) => e?.thinAccepted && Date.now() - e.fetchedAt > THIN_TTL_MS;
     const mem = memCache.get(key);
-    if (isFresh(mem)) return result(mem, true);
+    if (isFresh(mem) && !thinExpired(mem)) return result(mem, true);
     if (mem?.stale && Date.now() - mem.checkedAt < STALE_RETRY_MS) return result(mem, true);
     const disk = readCacheEntry(key);
     // v0.6.0 could cache a near-empty response as if it were real data.
-    if (isFresh(disk) && (disk.thinAccepted || totalGames(disk.cards) >= MIN_USEFUL_GAMES)) {
+    if (isFresh(disk) && !thinExpired(disk) && (disk.thinAccepted || totalGames(disk.cards) >= MIN_USEFUL_GAMES)) {
       memCache.set(key, disk);
       return result(disk, true);
     }
@@ -587,12 +599,25 @@ async function refreshSetData(setCode, key, win) {
 
   const cards = buildCardData(raw);
   const games = totalGames(cards);
+  // Card-game totals can look healthy while most cards still lack a GIH WR
+  // (17Lands withholds it under 500 drawn games) — a rerun's few days of data.
+  const sparse = gihCoverage(cards) < MIN_GIH_COVERAGE;
 
   // Empty, or far thinner than a *recent* snapshot of the same data: the set
   // has most likely left 17Lands' live window, so keep the richer snapshot.
   // Only snapshots under a week old count, so one thin response can't pin the
   // overlay to old numbers forever.
   const recentSnapshot = current && Date.now() - current.fetchedAt < RECENT_SNAPSHOT_MS && totalGames(current.cards) >= MIN_USEFUL_GAMES;
+  // Sparse: the full-format public dataset wins when it measures more of the
+  // set (an old set rerun on Arena). A new set with no table keeps live data.
+  if (sparse) {
+    const pub = await fromPublicDataset(setCode);
+    if (pub && gihCoverage(pub.cards) > gihCoverage(cards)) {
+      memCache.set(key, { ...pub, stale: true, checkedAt: Date.now() });
+      sendStatus(win, { status: 'loaded', setCode, count: pub.cards.length, fetchedAt: pub.fetchedAt, stale: true, staleReason: pub.staleReason });
+      return result({ ...pub, stale: true }, true);
+    }
+  }
   if (games < MIN_USEFUL_GAMES || (recentSnapshot && games < totalGames(current.cards) * THIN_RESPONSE_RATIO)) {
     // A recent snapshot of our own beats everything; next best is the set's
     // full-format stats from 17Lands' public dataset; old v0.5 caches last.
@@ -617,7 +642,7 @@ async function refreshSetData(setCode, key, win) {
 
   // thinAccepted: a small sample kept on purpose (nothing better existed), so
   // the startup check below doesn't keep re-fetching it.
-  const entry = { fetchedAt: Date.now(), cards, thinAccepted: games < MIN_USEFUL_GAMES };
+  const entry = { fetchedAt: Date.now(), cards, thinAccepted: games < MIN_USEFUL_GAMES || sparse };
   writeCacheEntry(key, entry);
   memCache.set(key, entry);
   sendStatus(win, { status: 'loaded', setCode, count: cards.length, fetchedAt: entry.fetchedAt });

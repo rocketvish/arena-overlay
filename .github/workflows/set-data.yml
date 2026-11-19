@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       sets:
-        description: 'Set codes (space-separated); empty = the 8 newest'
+        description: 'Set codes (space-separated); empty = the 16 newest'
         required: false
         default: ''
       force:

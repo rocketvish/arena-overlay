@@ -3,7 +3,7 @@
  * update-sets.js — rebuild and publish set tables whose 17Lands public
  * datasets are new or have changed since the published table was built.
  *
- *   node tools/pipeline/update-sets.js                 # the 8 newest expansions
+ *   node tools/pipeline/update-sets.js                 # the 16 newest expansions (Arena reruns older sets)
  *   node tools/pipeline/update-sets.js FRA SOS         # specific sets
  *   node tools/pipeline/update-sets.js --force HOB     # rebuild even if unchanged
  *   node tools/pipeline/update-sets.js --dry-run       # report only
@@ -22,7 +22,7 @@ const https = require('https');
 
 const REMOTE = 'https://github.com/rocketvish/arena-overlay/releases/download/set-data';
 const FORMAT = 'PremierDraft';
-const NEWEST = 8;
+const NEWEST = 16;
 
 // Every hop must be https to one of these: 17Lands (site + public dataset
 // bucket, incl. a regional S3 redirect) and GitHub release downloads, which

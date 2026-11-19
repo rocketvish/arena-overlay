@@ -192,6 +192,16 @@ function scanLogTail(filePath) {
 
   if (latestPackLine === -1) {
     console.log('[logWatcher] No draft pack events found in log during initial scan');
+    // Joined a draft before the app started, first pack not dealt yet: the
+    // EventJoin is the only place its set and format (Premier / Quick) appear.
+    if (broadcastFn) {
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (/==>\s*Event_?Join\b/.test(lines[i]) && lines[i].includes('Draft')) {
+          logParser.parseLine(lines[i], broadcastFn);
+          break;
+        }
+      }
+    }
     return;
   }
 
