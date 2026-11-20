@@ -531,8 +531,11 @@ async function fetchSetRatings(setCode, win = null, { force = false } = {}) {
     if (isFresh(mem) && !thinExpired(mem)) return result(mem, true);
     if (mem?.stale && Date.now() - mem.checkedAt < STALE_RETRY_MS) return result(mem, true);
     const disk = readCacheEntry(key);
-    // v0.6.0 could cache a near-empty response as if it were real data.
-    if (isFresh(disk) && !thinExpired(disk) && (disk.thinAccepted || totalGames(disk.cards) >= MIN_USEFUL_GAMES)) {
+    // v0.6.0 could cache a near-empty response as if it were real data, and
+    // before v0.12.2 a rerun's mostly-ungraded sample was cached as complete.
+    // thinAccepted marks a thin entry that already lost to the alternatives.
+    const complete = (e) => totalGames(e.cards) >= MIN_USEFUL_GAMES && gihCoverage(e.cards) >= MIN_GIH_COVERAGE;
+    if (isFresh(disk) && !thinExpired(disk) && (disk.thinAccepted || complete(disk))) {
       memCache.set(key, disk);
       return result(disk, true);
     }
